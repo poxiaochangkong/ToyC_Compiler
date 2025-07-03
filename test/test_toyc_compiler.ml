@@ -1,81 +1,103 @@
-(* (* test/test_toyc_compiler.ml *)
-
 open OUnit2
 open Toyc_compiler_lib
+open Ast
 
-(* --- 辅助函数 --- *)
+(* let ast_to_string (code : string) : string =
+  let lexbuf = Lexing.from_string code in
+  let ast = Parser.program Lexer.token lexbuf in
+  Ast.string_of_program ast
+;; *)
 
-(* 解析一个文件，如果成功则返回 AST，如果失败则抛出异常 *)
-let parse_file filename =
-  let in_channel = open_in filename in
-  let lexbuf = Lexing.from_channel in_channel in
-  try
-    let ast = Parser.comp_unit Lexer.main lexbuf in
-    close_in in_channel;
-    ast
-  with
-  | Lexer.Error msg ->
-    close_in_noerr in_channel;
-    failwith (Printf.sprintf "Lexer Error in %s: %s" filename msg)
-  | Parser.Error ->
-    close_in_noerr in_channel;
-    let pos = Lexing.lexeme_start_p lexbuf in
-    failwith
-      (Printf.sprintf
-         "Parser Error in %s at line %d, column %d"
-         filename
-         pos.pos_lnum
-         (pos.pos_cnum - pos.pos_bol + 1))
+(*打开文件读取内容到一个字符串*)
+let read_file filename =
+  let ch = open_in filename in
+  let s = really_input_string ch (in_channel_length ch) in
+  close_in ch;
+  s
 ;;
 
-(* --- 测试生成器 --- *)
-
-(* 为 "passing" 目录下的每个文件生成一个测试用例 *)
-(* 这个测试的期望是：解析过程不应抛出任何异常 *)
-let make_passing_test filename =
-  filename
-  >:: fun _ ->
-  (* 如果 parse_file 抛出异常，这个测试就会自动失败 *)
-  ignore (parse_file filename)
+(*code -> ast*)
+let ast_string_from_source code =
+  let lexbuf = Lexing.from_string code in
+  let ast = Parser.program Lexer.token lexbuf in
+  string_of_program ast
 ;;
 
-(* 为 "failing" 目录下的每个文件生成一个测试用例 *)
-(* 这个测试的期望是：解析过程必须抛出一个 Failure 异常 *)
-let make_failing_test filename =
-  filename
-  >:: fun _ ->
-  assert_raises (Failure "Parser or Lexer Error") (fun () -> ignore (parse_file filename))
-;;
-
-(* 我们使用 assert_raises 来捕获预期的失败。
-     注意：为了简化，我们让 parse_file 统一抛出 Failure 异常。
-     因此这里捕获 Failure。如果 parse_file 没有抛出任何异常，测试也会失败。*)
-
-(* --- 主逻辑 --- *)
-
-let () =
-  (* 定义测试用例存放的目录 *)
-  let passing_dir = "test/cases/passing" in
-  let failing_dir = "test/cases/failing" in
-  (* 读取目录内容，并为每个 .tc 文件生成测试 *)
-  let passing_tests =
-    Sys.readdir passing_dir
-    |> Array.to_list
-    |> List.filter (fun name -> Filename.check_suffix name ".tc")
-    |> List.map (fun name -> make_passing_test (Filename.concat passing_dir name))
-  in
-  let failing_tests =
-    Sys.readdir failing_dir
-    |> Array.to_list
-    |> List.filter (fun name -> Filename.check_suffix name ".tc")
-    |> List.map (fun name -> make_failing_test (Filename.concat failing_dir name))
-  in
-  (* 将所有生成的测试组织成一个测试套件 *)
-  let suite =
-    "ToyC File-based Tests"
-    >::: [ "Passing Cases" >::: passing_tests; "Failing Cases" >::: failing_tests ]
-  in
-  (* 运行测试套件 *)
-  run_test_tt_main suite
-;;
+(*
+   * 规范化字符串：
+ * 1. 使用正则表达式将所有空白字符序列 (\s+) 替换为单个空格。
+ * 2. 去除字符串开头和结尾的空格。
 *)
+let normalize_string s =
+  let open Str in
+  let s = global_replace (regexp "[ \t\n\r]+") " " s in
+  Base.String.strip s
+;;
+
+(* let data_dir = Filename.concat (Sys.getcwd ()) "data" *)
+
+(*通过文件名自动创建测试 测试ast的生成是否正确*)
+let create_test_case (test_file_path : string) =
+  let test_name = Filename.remove_extension (Filename.basename test_file_path) in
+  let expected_file_path = Filename.chop_extension test_file_path ^ ".expected" in
+  (* OUnit2 的测试函数 *)
+  let test_fun _ =
+    (* OUnit2 需要这个 context 参数 *)
+    (* 读取源文件和期望的输出文件 *)
+    let source_code = read_file test_file_path in
+    let expected_output_raw = read_file expected_file_path in
+    (* 运行我们的编译器逻辑，得到实际的输出 *)
+    let actual_output_raw = ast_string_from_source source_code in
+    (*在断言之前进行规范化*)
+    let expected_output = normalize_string expected_output_raw in
+    let actual_output = normalize_string actual_output_raw in
+    (* 断言实际输出与期望输出是否一致 *)
+    assert_equal
+      expected_output
+      actual_output
+      ~msg:(Printf.sprintf "Test failed for %s" test_name)
+      ~printer:(fun s -> "\n" ^ s)
+    (* 在失败时打印出更易读的格式 *)
+  in
+  test_name >:: test_fun
+;;
+
+(* let suite =
+  "File-based AST Test Suite"
+  >::: ((* a. 读取 tests/ 目录下的所有文件 *)
+        Sys.readdir "."
+        (* b. 转换成完整路径 *)
+        |> Array.to_list
+        |> List.map (fun fname -> Filename.concat data_dir fname)
+        (* c. 只保留以 .tc 结尾的文件 *)
+        |> List.filter (fun f -> Filename.check_suffix f ".tc")
+        (* d. 为每个 .tc 文件创建一个测试用例 *)
+        |> List.map create_test_case)
+;; *)
+let suite =
+  "File-based AST Test Suite"
+  >:::
+  let tests_dir = "../../../tests" in
+  try
+    Sys.readdir tests_dir
+    |> Array.to_list
+    (* 使用 Stdlib.Filename.concat 来拼接路径 *)
+    |> List.map (fun fname -> Stdlib.Filename.concat tests_dir fname)
+    (* 使用 Stdlib.Filename.check_suffix 来筛选文件 *)
+    |> List.filter (fun f -> Stdlib.Filename.check_suffix f ".tc")
+    |> List.map create_test_case
+  with
+  | Sys_error msg ->
+    Printf.eprintf
+      "\n[FATAL TEST ERROR] Could not read test directory '%s': %s\n\n"
+      tests_dir
+      msg;
+    []
+  | exn ->
+    Printf.eprintf
+      "\n[FATAL TEST ERROR] An unexpected error occurred: %s\n\n"
+      (Printexc.to_string exn);
+    []
+;;
+
+let () = run_test_tt_main suite

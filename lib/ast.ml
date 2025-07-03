@@ -81,111 +81,61 @@ let string_of_unop = function
 ;;
 
 (* 递归打印表达式 *)
-let rec string_of_expr level e =
-  let str_ind = indent level in
+let rec string_of_expr e =
   match e with
-  | IntLiteral n -> Printf.sprintf "%sInt(%d)" str_ind n
-  | Id s -> Printf.sprintf "%sId(%s)" str_ind s
+  | IntLiteral n -> Printf.sprintf "Int(%d)" n
+  | Id s -> Printf.sprintf "Id(%s)" s
   | BinOp (op, e1, e2) ->
     Printf.sprintf
-      "%sBinOp(%s,\n%s,\n%s\n%s)"
-      str_ind
+      "BinOp(%s, %s, %s)"
       (string_of_binop op)
-      (string_of_expr (level + 1) e1)
-      (string_of_expr (level + 1) e2)
-      str_ind
-  | UnOp (op, e) ->
-    Printf.sprintf
-      "%sUnOp(%s,\n%s\n%s)"
-      str_ind
-      (string_of_unop op)
-      (string_of_expr (level + 1) e)
-      str_ind
-  | Assign (id, e) ->
-    Printf.sprintf
-      "%sAssign(%s,\n%s\n%s)"
-      str_ind
-      id
-      (string_of_expr (level + 1) e)
-      str_ind
+      (string_of_expr e1)
+      (string_of_expr e2)
+  | UnOp (op, e) -> Printf.sprintf "UnOp(%s, %s)" (string_of_unop op) (string_of_expr e)
+  | Assign (id, e) -> Printf.sprintf "Assign(%s, %s)" id (string_of_expr e)
   | Call (fname, args) ->
-    let args_str =
-      if List.length args = 0
-      then ""
-      else
-        "\n"
-        ^ (List.map (string_of_expr (level + 1)) args |> String.concat ",\n")
-        ^ "\n"
-        ^ str_ind
-    in
-    Printf.sprintf "%sCall(%s,%s)" str_ind fname args_str
+    let args_str = List.map string_of_expr args |> String.concat ", " in
+    Printf.sprintf "Call(%s, [%s])" fname args_str
 
-(* 递归打印语句 (已根据你的要求修改) *)
-and string_of_stmt level s =
-  let str_ind = indent level in
+and string_of_stmt s =
   match s with
   | Block stmts ->
-    let stmts_str = List.map (string_of_stmt (level + 1)) stmts |> String.concat "\n" in
-    Printf.sprintf "%sBlock(\n%s\n%s)" str_ind stmts_str str_ind
-  | Expr e ->
-    Printf.sprintf "%sExpr(\n%s\n%s)" str_ind (string_of_expr (level + 1) e) str_ind
+    let stmts_str = List.map string_of_stmt stmts |> String.concat "; " in
+    Printf.sprintf "Block([%s])" stmts_str
+  | Expr e -> Printf.sprintf "Expr(%s)" (string_of_expr e)
   | Return expr_opt ->
-    let return_val_str =
+    let inner_str =
       match expr_opt with
-      | Some e -> Printf.sprintf "\n%s" (string_of_expr (level + 1) e)
-      | None -> " (void)" (* 表示没有返回值 *)
+      | Some e -> Printf.sprintf "Some(%s)" (string_of_expr e)
+      | None -> "None"
     in
-    Printf.sprintf "%sReturn(%s\n%s)" str_ind return_val_str str_ind
+    Printf.sprintf "Return(%s)" inner_str
   | If (cond, then_stmt, else_stmt_opt) ->
     let else_str =
       match else_stmt_opt with
-      | Some else_stmt ->
-        Printf.sprintf
-          ",\n%sElse(\n%s\n%s)"
-          str_ind
-          (string_of_stmt (level + 1) else_stmt)
-          str_ind
+      | Some else_stmt -> Printf.sprintf ", Else(%s)" (string_of_stmt else_stmt)
       | None -> ""
     in
     Printf.sprintf
-      "%sIf(\n%s,\n%s%s\n%s)"
-      str_ind
-      (string_of_expr (level + 1) cond)
-      (string_of_stmt (level + 1) then_stmt)
+      "If(%s, %s%s)"
+      (string_of_expr cond)
+      (string_of_stmt then_stmt)
       else_str
-      str_ind
   | While (cond, body) ->
-    Printf.sprintf
-      "%sWhile(\n%s,\n%s\n%s)"
-      str_ind
-      (string_of_expr (level + 1) cond)
-      (string_of_stmt (level + 1) body)
-      str_ind
-  | VarDecl (id, e) ->
-    Printf.sprintf
-      "%sVarDecl(%s,\n%s\n%s)"
-      str_ind
-      id
-      (string_of_expr (level + 1) e)
-      str_ind
-  | Break -> str_ind ^ "Break"
-  | Continue -> str_ind ^ "Continue"
+    Printf.sprintf "While(%s, %s)" (string_of_expr cond) (string_of_stmt body)
+  | VarDecl (id, e) -> Printf.sprintf "VarDecl(%s, %s)" id (string_of_expr e)
+  | Break -> "Break"
+  | Continue -> "Continue"
 ;;
 
-(* 打印函数定义 *)
-let string_of_func_def level f =
-  let str_ind = indent level in
+let string_of_func_def f =
   let params_str = String.concat ", " f.params in
-  let body_block = Block f.body in
-  let body_str = string_of_stmt (level + 1) body_block in
-  Printf.sprintf
-    "%sFuncDef(name=%s, params=[%s],\n  body=\n%s\n%s)"
-    str_ind
-    f.fname
-    params_str
-    body_str
-    str_ind
+  (* 将 body 语句列表直接转换为一个 Block 字符串，更符合结构 *)
+  let body_str = string_of_stmt (Block f.body) in
+  Printf.sprintf "FuncDef(name=%s, params=[%s], body=%s)" f.fname params_str body_str
 ;;
 
-(* 打印整个程序 *)
-let string_of_program prog = List.map (string_of_func_def 0) prog |> String.concat "\n\n"
+let string_of_program prog =
+  let funcs_str = List.map string_of_func_def prog |> String.concat ", " in
+  Printf.sprintf "[%s]" funcs_str
+;;

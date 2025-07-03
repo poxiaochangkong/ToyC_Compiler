@@ -31,7 +31,6 @@ let () =
     (* 4. 打印出生成的 AST *)
     print_endline "Parsing successful! Generated AST:";
     print_endline "--------------------------------------";
-    (* 调用我们之前在 Ast 模块中写的漂亮打印机 *)
     print_endline (string_of_program ast);
     print_endline "======================================"
   with

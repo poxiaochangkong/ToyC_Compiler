@@ -1,0 +1,1 @@
+[FuncDef(name=main, params=[], body=Block([Return(Some(Int(42)))]))]
