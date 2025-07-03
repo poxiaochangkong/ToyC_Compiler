@@ -1,9 +1,9 @@
 (menhir
  (modules parser))
 
+(ocamllex lexer)
+
 (library
  (name toyc_compiler_lib)
  (public_name toyc_compiler.lib)
  (libraries menhirLib))
-
-;(modules Ast Lexer Parser Semantic Codegen))

@@ -5,6 +5,8 @@ depends: [
   "dune" {>= "3.19" & >= "3.0"}
   "menhir"
   "menhirlib"
+  "ounit2"
+  "with-test"
   "odoc" {with-doc}
 ]
 build: [

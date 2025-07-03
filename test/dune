@@ -1,2 +1,9 @@
+; test/dune
+
 (test
- (name test_ToyC_Compiler))
+ ; 定义测试程序的名称，这也是入口 .ml 文件的名字
+ (name test_toyc_compiler)
+ ; 告诉 dune 这个测试依赖哪些库
+ (libraries ounit2 toyc_compiler_lib)
+ (deps
+  (source_tree cases)))

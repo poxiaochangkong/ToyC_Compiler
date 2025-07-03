@@ -1,19 +1,45 @@
-let () = print_endline "ToyC Compiler Starting ..."
-(*   try
-    let lexbuf = Lexing.from_channel stdin in
+(* (* main.ml *)
+let () =
+  let input_file = Sys.argv.(1) in
+  let output_file = Sys.argv.(2) in
+  let in_channel = open_in input_file in
+  let lexbuf = Lexing.from_channel in_channel in
+  let ast = Parser.program Lexer.token lexbuf in
+  let asm_code = Codegen.generate_code ast in
+  let out_channel = open_out output_file in
+  output_string out_channel asm_code;
+  close_in in_channel;
+  close_out out_channel
+;;
+*)
+open Toyc_compiler_lib
+open Ast
+
+let () =
+  let test_case = "int main() { int x = 10; return x + 32; }" in
+  print_endline "======================================";
+  print_endline "Input source code:";
+  print_endline test_case;
+  print_endline "======================================";
+  (* 2. 从字符串创建词法分析缓冲区 *)
+  (* Lexing.from_string 是关键，它让我们可以不依赖文件 *)
+  let lexbuf = Lexing.from_string test_case in
+  try
+    (* 3. 运行解析器并获取 AST *)
+    (* 这和从文件读取的调用方式完全一样 *)
     let ast = Parser.program Lexer.token lexbuf in
-    print_endline "Parsing successful ";
-    print_string (Ast.string_of_program ast);
-    let checked_ast = Semantic.check_program ast in
-    let generrated_code = Codegen.generate_code checked_ast in
-    print_endline "\n Generated Code  -";
-    print_endline generated_code;
-    print_ednline "ToyC Compiler Finished Successfully."
+    (* 4. 打印出生成的 AST *)
+    print_endline "Parsing successful! Generated AST:";
+    print_endline "--------------------------------------";
+    (* 调用我们之前在 Ast 模块中写的漂亮打印机 *)
+    print_endline (string_of_program ast);
+    print_endline "======================================"
   with
   | Lexer.Error msg -> Printf.eprintf "Lexer error: %s\n" msg
   | Parser.Error ->
-    let pos = Lexing.lexeme_start_p (Lexing.from_channel stdin) in
+    let pos = lexbuf.Lexing.lex_curr_p in
     Printf.eprintf
-      "Parser error at line %d, column %d\n"
-      pos.pos_lnum
-      (pos.pos_cnum - pos.pos_bol + 1) *)
+      "Parser error at line %d, character %d\n"
+      pos.Lexing.pos_lnum
+      (pos.Lexing.pos_cnum - pos.Lexing.pos_bol)
+;;

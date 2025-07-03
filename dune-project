@@ -14,4 +14,6 @@
   (dune
    (>= 3.0))
   menhir
-  menhirlib))
+  menhirlib
+  ounit2
+  with-test))
