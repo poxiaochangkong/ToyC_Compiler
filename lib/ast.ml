@@ -59,25 +59,25 @@ let indent level = String.make (level * 2) ' '
 
 (* 将二元运算符转换为字符串 *)
 let string_of_binop = function
-  | Add -> "+"
-  | Sub -> "-"
-  | Mul -> "*"
-  | Div -> "/"
-  | Mod -> "%"
-  | Eq -> "=="
-  | Neq -> "!="
-  | Lt -> "<"
-  | Le -> "<="
-  | Gt -> ">"
-  | Ge -> ">="
-  | And -> "&&"
-  | Or -> "||"
+  | Add -> "Add"
+  | Sub -> "Sub"
+  | Mul -> "Mul"
+  | Div -> "Div"
+  | Mod -> "Mod"
+  | Eq -> "Eq"
+  | Neq -> "Neq"
+  | Lt -> "Lt"
+  | Le -> "Le"
+  | Gt -> "Gt"
+  | Ge -> "Ge"
+  | And -> "And"
+  | Or -> "Or"
 ;;
 
 (* 将一元运算符转换为字符串 *)
 let string_of_unop = function
-  | Neg -> "-"
-  | Not -> "!"
+  | Neg -> "Neg"
+  | Not -> "Not"
 ;;
 
 (* 递归打印表达式 *)

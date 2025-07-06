@@ -1,4 +1,4 @@
-(* (* main.ml *)
+(* (* main.ml
 let () =
   let input_file = Sys.argv.(1) in
   let output_file = Sys.argv.(2) in
@@ -41,4 +41,27 @@ let () =
       "Parser error at line %d, character %d\n"
       pos.Lexing.pos_lnum
       (pos.Lexing.pos_cnum - pos.Lexing.pos_bol)
+;;
+*)
+
+(* bin/main.ml - Debugging version *)
+open Toyc_compiler_lib
+
+let () =
+  let source_code = "int main() { return 42; }" in
+  Printf.printf "Attempting to parse:\n---\n%s\n---\n" source_code;
+  let lexbuf = Lexing.from_string source_code in
+  try
+    (* 直接调用 Parser，不捕获错误，让它崩溃！*)
+    let ast = Parser.program Lexer.token lexbuf in
+    print_endline "Success! AST generated:";
+    print_endline (Ast.string_of_program ast)
+  with
+  (* 我们暂时不捕获 Parser.Error，让它直接暴露出来 *)
+  | Lexer.Error msg -> Printf.eprintf "Lexer Error: %s\n" msg
+  | e ->
+    (* 捕获任何其他异常，并打印详细信息 *)
+    Printf.eprintf "An unexpected error occurred: %s\n" (Printexc.to_string e);
+    Printexc.print_backtrace stderr;
+    exit 1
 ;;
