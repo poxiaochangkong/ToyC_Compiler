@@ -1,125 +1,90 @@
-(* open Ast *)
-(* 测试 *)
-(* let check_program prog =
-  print_endline "开始进行语义分析...";
-  prog
-;; *)
-
-
-(* semantic.ml *)
-
 open Ast
 open Symbol
-open Env
 
 exception SemanticError of string
-let error msg = raise (SemanticError msg)
 
-(* 类型判断辅助 *)
-let expect_type actual expected msg =
-  if actual <> expected then error msg
+(* 构建函数符号表 *)
+let build_func_env (funcs: func list) : func_env =
+  List.fold_left (fun env f ->
+    let arg_types = List.map fst f.args in
+    StringMap.add f.name (arg_types, f.rettyp) env
+  ) StringMap.empty funcs
 
-(* 表达式检查，返回表达式类型 *)
-let rec check_expr env = function
-  | IntLiteral _ -> TInt
+(* 扩展变量环境 *)
+let add_var (venv: var_env) (name: string) (t: typ) : var_env =
+  StringMap.add name t venv
 
-  | Var id ->
-      (match find_var env id with
-       | Some { v_type; initialized = true } -> v_type
-       | Some _ -> error ("变量未初始化: " ^ id)
-       | None -> error ("变量未声明: " ^ id))
-
-  | Assign (id, expr) ->
-      let t = check_expr env expr in
-      (match find_var env id with
-       | Some { v_type; _ } when v_type = t ->
-           let env = update_var env id { v_type; initialized = true } in
-           (env, t)
-       | Some _ -> error "赋值类型不匹配"
-       | None -> error ("变量未声明: " ^ id))
-
-  | Binop (e1, _, e2) ->
-      let t1 = check_expr env e1 in
-      let t2 = check_expr env e2 in
-      expect_type t1 TInt "二元操作数类型必须为 int";
-      expect_type t2 TInt "二元操作数类型必须为 int";
-      TInt
-
+(* 表达式类型推导 *)
+let rec type_of_expr (env: env) (e: expr) : typ =
+  match e with
+  | Int _ -> TyInt
+  | Bool _ -> TyBool
+  | Var x -> StringMap.find x env.vars
+  | Binop (op, e1, e2) ->
+      let t1 = type_of_expr env e1 in
+      let t2 = type_of_expr env e2 in
+      begin match op with
+      | Add | Sub | Mul | Div -> if t1 = TyInt && t2 = TyInt then TyInt else raise (SemanticError "Int op on non-int")
+      | Lt | Le | Gt | Ge | Eq | Ne -> if t1 = t2 then TyBool else raise (SemanticError "Comparison type mismatch")
+      | And | Or -> if t1 = TyBool && t2 = TyBool then TyBool else raise (SemanticError "Logical op on non-bool")
+      end
+  | Unop (op, e) ->
+      let t = type_of_expr env e in
+      begin match op with
+      | Neg -> if t = TyInt then TyInt else raise (SemanticError "Neg on non-int")
+      | Not -> if t = TyBool then TyBool else raise (SemanticError "Not on non-bool")
+      end
   | Call (fname, args) ->
-      (match find_func env fname with
-       | None -> error ("未定义函数: " ^ fname)
-       | Some { ret_type; params } ->
-           if List.length args <> List.length params then
-             error ("函数参数个数不匹配: " ^ fname);
-           List.iter2 (fun arg (expected_t, _) ->
-             let actual_t = check_expr env arg in
-             expect_type actual_t expected_t "函数参数类型不匹配")
-             args params;
-           ret_type
-      )
+      let (param_types, ret_type) = StringMap.find fname env.funcs in
+      if List.length param_types <> List.length args then
+        raise (SemanticError "Function argument count mismatch")
+      else
+        List.iter2 (fun arg typ ->
+          let argt = type_of_expr env arg in
+          if argt <> typ then raise (SemanticError "Argument type mismatch")
+        ) args param_types;
+      ret_type
+  | Assign (name, e) ->
+      let vt = StringMap.find name env.vars in
+      let et = type_of_expr env e in
+      if vt <> et then raise (SemanticError "Assign type mismatch");
+      vt
 
-      let rec check_stmt env = function
-  | Decl (TInt, id, expr) ->
-      let t = check_expr env expr in
-      expect_type t TInt "变量初始化必须是 int 类型";
-      add_var env id { v_type = TInt; initialized = true }
-
-  | AssignStmt (id, expr) ->
-      let t = check_expr env expr in
-      (match find_var env id with
-       | Some { v_type } when v_type = t ->
-           update_var env id { v_type; initialized = true }
-       | Some _ -> error "赋值类型错误"
-       | None -> error ("变量未声明: " ^ id))
-
-  | If (cond, s1, s2_opt) ->
-      expect_type (check_expr env cond) TInt "if 条件必须为 int";
-      ignore (check_stmt env s1);
-      (match s2_opt with Some s2 -> ignore (check_stmt env s2) | None -> ());
+(* 声明语句中的变量 *)
+let rec analyze_stmt (env: env) (stmt: stmt) : env =
+  match stmt with
+  | Decl (t, name) -> { env with vars = add_var env.vars name t }
+  | AssignStmt (name, e) ->
+      ignore (type_of_expr env e); env
+  | Expr e ->
+      ignore (type_of_expr env e); env
+  | If (cond, s1, s2) ->
+      ignore (type_of_expr env cond);
+      ignore (analyze_stmt env s1);
+      ignore (analyze_stmt env s2);
       env
-
   | While (cond, body) ->
-      expect_type (check_expr env cond) TInt "while 条件必须为 int";
-      let env' = { env with in_loop = true } in
-      ignore (check_stmt env' body);
+      ignore (type_of_expr env cond);
+      ignore (analyze_stmt env body);
       env
-
-  | Break | Continue ->
-      if env.in_loop then env
-      else error "break/continue 必须在循环内使用"
-
-  | Return None ->
-      expect_type TVoid env.current_ret_type "缺少返回值"
-
-  | Return (Some expr) ->
-      let t = check_expr env expr in
-      expect_type t env.current_ret_type "返回值类型不匹配";
+  | Return eo ->
+      begin match eo with
+      | None -> ()
+      | Some e -> ignore (type_of_expr env e)
+      end;
       env
-
   | Block stmts ->
-      let env' = push_scope env in
-      let _ = List.fold_left check_stmt env' stmts in
-      pop_scope env
+      List.fold_left analyze_stmt env stmts
 
-      let check_func env (ret_type, name, params, body) =
-  let param_env =
-    List.fold_left (fun acc (t, id) ->
-      add_var acc id { v_type = t; initialized = true })
-      (push_scope env)
-      params
-  in
-  let env' = { param_env with current_ret_type = ret_type; in_loop = false } in
-  ignore (check_stmt env' body)
+(* 整个函数 *)
+let analyze_func (func_env: func_env) (f: func) : unit =
+  let init_env = {
+    funcs = func_env;
+    vars = List.fold_left (fun acc (t, n) -> add_var acc n t) StringMap.empty f.args;
+  } in
+  ignore (analyze_stmt init_env f.body)
 
-let check_program funcs =
-  let env =
-    List.fold_left (fun env (ret_type, name, params, _) ->
-      add_func env name { ret_type; params })
-      empty_env funcs
-  in
-  let has_main =
-    List.exists (fun (ret_type, name, params, _) ->
-      name = "main" && ret_type = TInt && params = []) funcs
-  in
-  if not has_main then error "必须包含 int main() 函数";
-  List.iter (check_func env) funcs
+(* 程序分析入口 *)
+let analyze_program (p: program) : unit =
+  let func_env = build_func_env p in
+  List.iter (analyze_func func_env) p

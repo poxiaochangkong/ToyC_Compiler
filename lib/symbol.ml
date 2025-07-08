@@ -1,12 +1,10 @@
+(* This module defines the types and structures used for symbol tables in a type checker *)
+module StringMap = Map.Make(String)
 
-type typ = TInt | TVoid
+type var_env = typ StringMap.t
+type func_env = (typ list * typ) StringMap.t
 
-type var_info = {
-  v_type : typ;
-  initialized : bool;
-}
-
-type func_info = {
-  ret_type : typ;
-  params : (typ * string) list;
+type env = {
+  vars: var_env;
+  funcs: func_env;
 }
