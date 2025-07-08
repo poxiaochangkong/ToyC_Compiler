@@ -30,18 +30,22 @@
 %right NOT NEG                    /* A dummy token for unary minus/not precedence */
 
 %start <Ast.program> program
+%start <Ast.expr> single_expr (*用于调试的入口 *)
+%token Menhir_error
 
 %%
 
 
-program:
+program: (*程序的主入口点*)
   | funcs=nonempty_list(func_def) EOF { funcs }
-
+single_expr :
+  | e=expr EOF { e }
 /* FuncDef -> ("int" | "void") ID "(" (Param ("," Param)*)? ")" Block */
 func_def:
   | INT fname=ID LPAREN params=separated_list(COMMA, param) RPAREN body=block {
       { fname=fname; params=params; body=body }
     }
+  | error RBRACE {failwith "Syntax error in function definition, perhaps missing a '}'?"}
   /* 这里我们现在只是返回int类型的值 */
 
 /* Param -> "int" ID */
@@ -63,7 +67,9 @@ stmt:
   | CONTINUE SEMICOLON { Continue }
   | RETURN e=expr SEMICOLON { Return(Some(e)) }
   | inner_block=block { Block(inner_block) } /* A block can also be a statement */
-
+  | error SEMICOLON {Printf.eprintf "Syntax error in statement . Skipping to the next semiclolon. \n"
+                    failwith "Syntax error in statment."}
+   /*在解析stmt 语句的是偶出错, 就一直忽略token直到下一个; 到来*/
 
 expr:
   | ID ASSIGN e=expr { Assign($1, e) }
@@ -115,3 +121,4 @@ PrimaryExpr:
   | name=ID { Id(name) }
   | LPAREN e=expr RPAREN { e }
   | name=ID LPAREN args=separated_list(COMMA, expr) RPAREN { Call(name, args) }
+  | error {failwith "Syntax error in expression."}
