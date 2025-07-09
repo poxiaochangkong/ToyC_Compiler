@@ -41,13 +41,21 @@ program: (*程序的主入口点*)
 single_expr :
   | e=expr EOF { e }
 /* FuncDef -> ("int" | "void") ID "(" (Param ("," Param)*)? ")" Block */
+// func_def:
+//   | INT fname=ID LPAREN params=separated_list(COMMA, param) RPAREN body=block {
+//       { fname=fname; params=params; body=body }
+//     }
+//   | error RBRACE {failwith "Syntax error in function definition, perhaps missing a '}'?"}
+//   /* 这里我们现在只是返回int类型的值 */
+
 func_def:
   | INT fname=ID LPAREN params=separated_list(COMMA, param) RPAREN body=block {
-      { fname=fname; params=params; body=body }
+      { fname; params; rettyp = TInt; body }
     }
-  | error RBRACE {failwith "Syntax error in function definition, perhaps missing a '}'?"}
-  /* 这里我们现在只是返回int类型的值 */
-
+  | VOID fname=ID LPAREN params=separated_list(COMMA, param) RPAREN body=block {
+      { fname; params; rettyp = TVoid; body }
+    }
+  | error RBRACE { failwith "Syntax error in function definition" }
 /* Param -> "int" ID */
 param:
   | INT name=ID { name }
@@ -65,7 +73,9 @@ stmt:
   | WHILE LPAREN cond=expr RPAREN loop_body=stmt { While(cond, loop_body) }
   | BREAK SEMICOLON { Break }
   | CONTINUE SEMICOLON { Continue }
-  | RETURN e=expr SEMICOLON { Return(Some(e)) }
+  // | RETURN e=expr SEMICOLON { Return(Some(e)) }
+  | RETURN SEMICOLON { Return None }
+  | RETURN e=expr SEMICOLON { Return (Some (e)) }
   | inner_block=block { Block(inner_block) } /* A block can also be a statement */
   | error SEMICOLON {Printf.eprintf "Syntax error in statement . Skipping to the next semiclolon. \n"
                     failwith "Syntax error in statment."}
@@ -111,9 +121,12 @@ MulExpr:
 /* UnaryExpr -> PrimaryExpr | ("+" | "-" | "!") UnaryExpr */
 UnaryExpr:
   | PrimaryExpr { $1 }
-  | PLUS UnaryExpr  { $2 } /* Unary plus is a no-op */
-  | MINUS UnaryExpr %prec NEG { UnOp(Neg, $2) } /* Use %prec to give it correct precedence */
-  | NOT UnaryExpr   %prec NEG { UnOp(Not, $2) }
+  // | PLUS UnaryExpr  { $2 } /* Unary plus is a no-op */
+  // | MINUS UnaryExpr %prec NEG { UnOp(Neg, $2) } /* Use %prec to give it correct precedence */
+  // | NOT UnaryExpr   %prec NEG { UnOp(Not, $2) }
+  | NOT UnaryExpr { UnOp (Not, $2) }
+  | MINUS UnaryExpr { UnOp (Minus, $2)} %prec UOP_MINUS
+  | PLUS UnaryExpr { UnOp (Plus, $2)} %prec UOP_PLUS
 
 /* PrimaryExpr -> ID | NUMBER | "(" Expr ")" | ID "(" (Expr ("," Expr)*)? ")" */
 PrimaryExpr:

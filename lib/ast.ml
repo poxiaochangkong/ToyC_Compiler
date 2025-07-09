@@ -1,5 +1,11 @@
 (* lib/ast.ml *)
 
+(* 基本类型定义 *)
+type typ =
+  | TInt
+  (* 整数类型 *)
+  | TVoid (* 空类型 *)
+
 (* 定义所有二元运算符 *)
 type binop =
   | Add
@@ -17,9 +23,10 @@ type binop =
   | Or
 
 (* 定义所有一元运算符 *)
-type unop =
+(* type unop =
   | Neg
-  | Not
+  | Not *)
+type unop = Not | Plus | Minus
 
 (* 表达式 (Expr) 的定义 *)
 type expr =
@@ -46,11 +53,18 @@ type stmt =
 type param = string
 
 (* 函数定义 (FuncDef) *)
-type func_def =
+(* type func_def =
   { fname : string (* ID *)
   ; params : param list (* (Param, ...)? *)
   ; body : stmt list (* Block *)
-  }
+  } *)
+type func_def = {
+  fname: string;
+  params: param list;
+  rettyp: typ;  (* 明确返回类型 *)
+  body: stmt list;
+}
+
 
 (* 编译单元 (CompUnit)，也就是整个程序 *)
 type program = func_def list (* FuncDef+ *)
@@ -75,9 +89,14 @@ let string_of_binop = function
 ;;
 
 (* 将一元运算符转换为字符串 *)
-let string_of_unop = function
+(* let string_of_unop = function
   | Neg -> "Neg"
   | Not -> "Not"
+;; *)
+let string_of_unop = function
+  | Not -> "Not"
+  | Plus -> "Plus"
+  | Minus -> "Minus"
 ;;
 
 (* 递归打印表达式 *)
