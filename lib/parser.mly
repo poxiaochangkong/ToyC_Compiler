@@ -30,7 +30,7 @@
 %right NOT NEG                    /* A dummy token for unary minus/not precedence */
 
 %start <Ast.program> program
-%start <Ast.expr> single_expr (*用于调试的入口 *)
+//%start <Ast.expr> single_expr (*用于调试的入口 *)
 %token Menhir_error
 
 %%
@@ -121,12 +121,9 @@ MulExpr:
 /* UnaryExpr -> PrimaryExpr | ("+" | "-" | "!") UnaryExpr */
 UnaryExpr:
   | PrimaryExpr { $1 }
-  // | PLUS UnaryExpr  { $2 } /* Unary plus is a no-op */
-  // | MINUS UnaryExpr %prec NEG { UnOp(Neg, $2) } /* Use %prec to give it correct precedence */
-  // | NOT UnaryExpr   %prec NEG { UnOp(Not, $2) }
-  | NOT UnaryExpr { UnOp (Not, $2) }
-  | MINUS UnaryExpr { UnOp (Minus, $2)} %prec UOP_MINUS
-  | PLUS UnaryExpr { UnOp (Plus, $2)} %prec UOP_PLUS
+   | PLUS UnaryExpr  { $2 } /* 正数形式的可以直接优化掉*/
+   | MINUS UnaryExpr %prec NEG { UnOp(Neg, $2) } /* Use %prec to give it correct precedence */
+   | NOT UnaryExpr   %prec NEG { UnOp(Not, $2) }
 
 /* PrimaryExpr -> ID | NUMBER | "(" Expr ")" | ID "(" (Expr ("," Expr)*)? ")" */
 PrimaryExpr:
