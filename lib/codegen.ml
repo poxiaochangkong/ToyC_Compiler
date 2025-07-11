@@ -30,79 +30,174 @@ let generate_code (prog : program) : string =
 ;;
 *)
 (* codegen.ml *)
+(* • 分离临时与标签计数器
+    • 布尔、比较、短路逻辑归一化为 0/1
+    • 调用序列 param / call / retval
+--------------------------------------------------------------*) 
 
-open Ast (* 确保 ast.ml 已经存在并被正确编译和链接 *)
+open Ast
 
-let rec gen_expr expr temp_counter =
-  match expr with
-  | IntLiteral n -> 
-      let t = "t" ^ string_of_int !temp_counter in
-      incr temp_counter;
-      ([t ^ " = " ^ string_of_int n], t)
-  | BinOp (op, e1, e2) ->
-      let (code1, t1) = gen_expr e1 temp_counter in
-      let (code2, t2) = gen_expr e2 temp_counter in
-      let t = "t" ^ string_of_int !temp_counter in
-      incr temp_counter;
+(* ---------- 计数器 ---------- *)
+let temp_counter  = ref 0
+let label_counter = ref 0
+let fresh_tmp ()  = let t = "t" ^ string_of_int !temp_counter in incr temp_counter; t
+let fresh_lbl pfx = let l = pfx ^ string_of_int !label_counter in incr label_counter; l
+
+(* ============================================================= *)
+(*  Expr → code * result tmp                                      *)
+(* ============================================================= *)
+
+let rec gen_expr (e : expr) : string list * string =
+  match e with
+  | IntLiteral n ->
+      let t = fresh_tmp () in
+      ([Printf.sprintf "%s = %d" t n], t)
+
+  | Id x ->
+      let t = fresh_tmp () in
+      ([Printf.sprintf "%s = %s" t x], t)
+
+  | Assign (x, rhs) ->
+      let c_rhs, t_rhs = gen_expr rhs in
+      let t_ret = fresh_tmp () in
+      ( c_rhs
+      @ [Printf.sprintf "%s = %s" x t_rhs;
+         Printf.sprintf "%s = %s" t_ret x],
+        t_ret )
+
+  | BinOp (op, e1, e2) when List.mem op [Add;Sub;Mul;Div;Mod] ->
+      let c1, t1 = gen_expr e1 in
+      let c2, t2 = gen_expr e2 in
+      let t = fresh_tmp () in
       let op_str = match op with
-        | Add -> "+" | Sub -> "-" | Mul -> "*" | Div -> "/"
-        | Mod -> "%" | Eq -> "==" | Neq -> "!=" 
-        | Lt -> "<" | Le -> "<=" | Gt -> ">" | Ge -> ">="
-        | And -> "&&" | Or -> "||" in
-      (code1 @ code2 @ [t ^ " = " ^ t1 ^ " " ^ op_str ^ " " ^ t2], t)
-  | UnOp (op, e) ->
-      let (code, t1) = gen_expr e temp_counter in
-      let t = "t" ^ string_of_int !temp_counter in
-      incr temp_counter;
-      let op_str = match op with
-        | Neg -> "-" | Not -> "!" in
-      (code @ [t ^ " = " ^ op_str ^ t1], t)
-  | Assign (x, e) ->
-      let (code, t) = gen_expr e temp_counter in
-      (code @ [x ^ " = " ^ t], x)
-  | _ -> failwith "Not implemented yet"
+        | Add->"+"|Sub->"-"|Mul->"*"|Div->"/"|Mod->"%"| _ -> assert false in
+      ( c1 @ c2 @ [Printf.sprintf "%s = %s %s %s" t t1 op_str t2], t)
 
-let rec gen_stmt stmt temp_counter =
-  match stmt with
-  | Expr e ->
-      let (code, _) = gen_expr e temp_counter in
-      code
-  | Return (Some e) ->
-      let (code, t) = gen_expr e temp_counter in
-      code @ ["ret " ^ t]
-  | Return None ->
-      ["ret"]
-  | If (cond, then_stmt, else_stmt_opt) ->
-      let (cond_code, t_cond) = gen_expr cond temp_counter in
-      let then_code = gen_stmt then_stmt temp_counter in
-      let else_code =
-        match else_stmt_opt with
-        | Some s -> gen_stmt s temp_counter
-        | None -> []
-      in
-      let label_else = "L_else_" ^ string_of_int !temp_counter in
-      let label_end = "L_end_" ^ string_of_int (!temp_counter + 1) in
-      incr temp_counter; incr temp_counter;
-      cond_code
-      @ [Printf.sprintf "beqz %s, %s" t_cond label_else]
-      @ then_code
-      @ [Printf.sprintf "j %s" label_end]
-      @ [label_else ^ ":"]
-      @ else_code
-      @ [label_end ^ ":"]
-  | _ -> failwith "Not implemented"
+  | BinOp (op, e1, e2) when List.mem op [Eq;Neq;Lt;Le;Gt;Ge] ->
+      let c1, t1 = gen_expr e1 in
+      let c2, t2 = gen_expr e2 in
+      let t = fresh_tmp () in
+      let l_true = fresh_lbl "L_true_" in
+      let l_end  = fresh_lbl "L_end_" in
+      let br = match op with
+        | Eq->"beq" | Neq->"bne" | Lt->"blt" | Le->"ble" | Gt->"bgt" | Ge->"bge" | _->assert false in
+      ( c1 @ c2
+        @ [Printf.sprintf "%s = 0" t;
+           Printf.sprintf "%s %s, %s, %s" br t1 t2 l_true;
+           Printf.sprintf "j %s" l_end;
+           l_true ^ ":";
+           Printf.sprintf "%s = 1" t;
+           l_end ^ ":"],
+        t)
 
-let gen_func f =
-  let header = Printf.sprintf "%s:\n" f.fname in
-  let temp_counter = ref 0 in
-  let body =
-    List.map (fun stmt -> gen_stmt stmt temp_counter) f.body
-    |> List.flatten
-    |> String.concat "\n"
-  in
-  header ^ body
-  
+  | BinOp (op, e1, e2) when op = And || op = Or ->
+      let c1, t1 = gen_expr e1 in
+      let c2, t2 = gen_expr e2 in
+      let t_res = fresh_tmp () in
+      let l_short = fresh_lbl "L_short_" in
+      let l_end   = fresh_lbl "L_end_"   in
+      let set_short, set_normal, cond1, cond2 =
+        if op = And then
+          ("0", "1",
+           Printf.sprintf "beqz %s, %s" t1 l_short,
+           Printf.sprintf "beqz %s, %s" t2 l_short)
+        else (* Or *)
+          ("1", "0",
+           Printf.sprintf "bnez %s, %s" t1 l_short,
+           Printf.sprintf "bnez %s, %s" t2 l_short) in
+      ( c1 @ [cond1] @ c2 @ [cond2;
+          Printf.sprintf "%s = %s" t_res set_normal;
+          Printf.sprintf "j %s" l_end;
+          l_short ^ ":";
+          Printf.sprintf "%s = %s" t_res set_short;
+          l_end ^ ":"],
+        t_res)
 
+  | UnOp (Not, e1) ->
+      let c, t1 = gen_expr e1 in
+      let t = fresh_tmp () in
+      let l_true = fresh_lbl "L_true_" in
+      let l_end  = fresh_lbl "L_end_" in
+      ( c @ [Printf.sprintf "%s = 0" t;
+             Printf.sprintf "beqz %s, %s" t1 l_true;
+             Printf.sprintf "j %s" l_end;
+             l_true ^ ":";
+             Printf.sprintf "%s = 1" t;
+             l_end ^ ":"],
+        t)
 
-let gen_program (p : program) =
-  List.map gen_func p |> String.concat "\n"
+  | UnOp (Neg, e1) ->
+      let c, t1 = gen_expr e1 in
+      let t = fresh_tmp () in
+      (c @ [Printf.sprintf "%s = - %s" t t1], t)
+
+  | Call (fname, args) ->
+      let arg_codes, arg_tmps = List.split (List.map gen_expr args) in
+      let t_ret = fresh_tmp () in
+      ( List.flatten arg_codes
+        @ List.map (fun t -> "param " ^ t) arg_tmps
+        @ [Printf.sprintf "call %s, %d" fname (List.length arg_tmps);
+           Printf.sprintf "%s = retval" t_ret],
+        t_ret )
+
+  | _ -> failwith "unsupported expr"
+
+(* ============================================================= *)
+(*  Stmt → code list                                              *)
+(* ============================================================= *)
+
+let rec gen_stmt ?break_lbl ?cont_lbl (s : stmt) : string list =
+  match s with
+  | Block lst -> List.flatten (List.map (gen_stmt ?break_lbl ?cont_lbl) lst)
+
+  | VarDecl (id, init_e) ->
+      let c, t = gen_expr init_e in
+      c @ [Printf.sprintf "%s = %s" id t]
+
+  | Expr e -> fst (gen_expr e)
+
+  | Return None -> ["ret 0"]
+
+  | Return (Some e) -> let c, t = gen_expr e in c @ ["ret " ^ t]
+
+  | If (cond, s_then, s_else_opt) ->
+      let c_cond, t_c = gen_expr cond in
+      let l_else = fresh_lbl "L_else_" in
+      let l_end  = fresh_lbl "L_end_" in
+      let then_c = gen_stmt ?break_lbl ?cont_lbl s_then in
+      let else_c = match s_else_opt with Some s -> gen_stmt ?break_lbl ?cont_lbl s | None -> [] in
+      c_cond
+      @ [Printf.sprintf "beqz %s, %s" t_c l_else]
+      @ then_c
+      @ [Printf.sprintf "j %s" l_end; l_else ^ ":"]
+      @ else_c
+      @ [l_end ^ ":"]
+
+  | While (cond, body) ->
+      let l_begin = fresh_lbl "L_begin_" in
+      let l_end   = fresh_lbl "L_end_"   in
+      let c_cond, t_c = gen_expr cond in
+      let body_c = gen_stmt ~break_lbl:l_end ~cont_lbl:l_begin body in
+      [l_begin ^ ":"]
+      @ c_cond
+      @ [Printf.sprintf "beqz %s, %s" t_c l_end]
+      @ body_c
+      @ [Printf.sprintf "j %s" l_begin; l_end ^ ":"]
+
+  | Break -> (match break_lbl with Some l -> ["j " ^ l] | None -> failwith "break not in loop")
+
+  | Continue -> (match cont_lbl with Some l -> ["j " ^ l] | None -> failwith "continue not in loop")
+
+  | _ -> failwith "stmt not supported"
+
+(* ============================================================= *)
+(*  Function / Program                                            *)
+(* ============================================================= *)
+
+let gen_func (f : func_def) : string list =
+  let body = List.flatten (List.map (gen_stmt) f.body) in
+  (f.fname ^ ":") :: body
+
+let gen_program (p : program) : string list =
+  List.flatten (List.map gen_func p)
+
