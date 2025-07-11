@@ -45,7 +45,7 @@ let () =
 *)
 
 (* bin/main.ml - Debugging version *)
-open Toyc_compiler_lib           
+open Toyc_compiler_lib
 
 let () =
   let source_code = "int main() { return 42; }" in
@@ -53,14 +53,13 @@ let () =
   let lexbuf = Lexing.from_string source_code in
   try
     (* 用带命名空间的模块名 *)
-    let ast = Toyc_compiler_lib.Parser.program Toyc_compiler_lib.Lexer.token lexbuf in
+    let ast = Parser.program Lexer.token lexbuf in
     print_endline "Success! AST generated:";
     print_endline (Toyc_compiler_lib.Ast.string_of_program ast)
   with
-  | Toyc_compiler_lib.Lexer.Error msg ->
-      Printf.eprintf "Lexer Error: %s\n" msg
+  | Toyc_compiler_lib.Lexer.Error msg -> Printf.eprintf "Lexer Error: %s\n" msg
   | e ->
-      Printf.eprintf "Unexpected error: %s\n" (Printexc.to_string e);
-      Printexc.print_backtrace stderr;
-      exit 1
-
+    Printf.eprintf "Unexpected error: %s\n" (Printexc.to_string e);
+    Printexc.print_backtrace stderr;
+    exit 1
+;;
