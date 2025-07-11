@@ -225,7 +225,7 @@ let rec gen_stmt env ?break_lbl ?cont_lbl (s : stmt) : string list =
        | Some l -> ["j " ^ l]
        | None   -> raise (SemanticError "continue not in loop"))
 
-  | _ -> raise (SemanticError "stmt not supported")
+  (* | _ -> raise (SemanticError "stmt not supported") *)
 
 (* ============================================================= *)
 (*  Function / Program                                            *)
