@@ -45,23 +45,22 @@ let () =
 *)
 
 (* bin/main.ml - Debugging version *)
-open Toyc_compiler_lib
+open Toyc_compiler_lib           
 
 let () =
   let source_code = "int main() { return 42; }" in
   Printf.printf "Attempting to parse:\n---\n%s\n---\n" source_code;
   let lexbuf = Lexing.from_string source_code in
   try
-    (* 直接调用 Parser，不捕获错误，让它崩溃！*)
-    let ast = Parser.program Lexer.token lexbuf in
+    (* 用带命名空间的模块名 *)
+    let ast = Toyc_compiler_lib.Parser.program Toyc_compiler_lib.Lexer.token lexbuf in
     print_endline "Success! AST generated:";
-    print_endline (Ast.string_of_program ast)
+    print_endline (Toyc_compiler_lib.Ast.string_of_program ast)
   with
-  (* 我们暂时不捕获 Parser.Error，让它直接暴露出来 *)
-  | Lexer.Error msg -> Printf.eprintf "Lexer Error: %s\n" msg
+  | Toyc_compiler_lib.Lexer.Error msg ->
+      Printf.eprintf "Lexer Error: %s\n" msg
   | e ->
-    (* 捕获任何其他异常，并打印详细信息 *)
-    Printf.eprintf "An unexpected error occurred: %s\n" (Printexc.to_string e);
-    Printexc.print_backtrace stderr;
-    exit 1
-;;
+      Printf.eprintf "Unexpected error: %s\n" (Printexc.to_string e);
+      Printexc.print_backtrace stderr;
+      exit 1
+
