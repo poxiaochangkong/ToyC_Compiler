@@ -71,7 +71,7 @@ type analysis_result = {
 
 (* 构建全局函数符号表 *)
 let build_func_env (funcs: func_def list) : func_sig FuncEnv.t =
-  List.fold_left (fun acc f ->
+  List.fold_left (fun acc (f:func_def) ->
     let param_types = List.map (fun _ -> TInt) f.params in
     FuncEnv.add f.fname { params = param_types; return = f.rettyp } acc
   ) FuncEnv.empty funcs

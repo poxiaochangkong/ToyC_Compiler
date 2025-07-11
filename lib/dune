@@ -6,4 +6,6 @@
 (library
  (name toyc_compiler_lib)
  (public_name toyc_compiler.lib)
- (libraries menhirLib))
+ (libraries menhirLib)
+ (modules ast semantic codegen parser lexer)
+ )
