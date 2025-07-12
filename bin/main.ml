@@ -55,7 +55,8 @@ let () =
     (* 用带命名空间的模块名 *)
     let ast = Parser.program Lexer.token lexbuf in
     print_endline "Success! AST generated:";
-    print_endline (Toyc_compiler_lib.Ast.string_of_program ast)
+    print_endline (Toyc_compiler_lib.Ast.string_of_program ast);
+    ignore(Codegen.gen_program ast)
   with
   | Toyc_compiler_lib.Lexer.Error msg -> Printf.eprintf "Lexer Error: %s\n" msg
   | e ->

@@ -1,4 +1,6 @@
 (executable
  (name main)
  (public_name toyc_compiler)
- (libraries toyc_compiler_lib))
+ (libraries toyc_compiler_lib)
+ (modes byte exe)
+ (flags (:standard -g)))
