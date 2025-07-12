@@ -33,6 +33,7 @@ let generate_code (prog : program) : string =
 (* • 分离临时与标签计数器
     • 布尔、比较、短路逻辑归一化为 0/1
     • 调用序列 param / call / retval
+    假设物理寄存器6个
 --------------------------------------------------------------*)
 
 open Ast
@@ -76,7 +77,6 @@ let rec gen_expr env (e : expr) : string list * string =
     let t = fresh_tmp () in
     [ Printf.sprintf "%s = %d" t n ], t
   | Id x ->
-    (* —— 使用符号表检查变量是否可见 —— *)
     (match VarEnv.find_opt x env.vars with
      | None -> raise (SemanticError ("unbound variable " ^ x))
      | Some _ ->
@@ -94,12 +94,7 @@ let rec gen_expr env (e : expr) : string list * string =
     let t = fresh_tmp () in
     let op_str =
       match op with
-      | Add -> "+"
-      | Sub -> "-"
-      | Mul -> "*"
-      | Div -> "/"
-      | Mod -> "%"
-      | _ -> assert false
+      | Add -> "+" | Sub -> "-" | Mul -> "*" | Div -> "/" | Mod -> "%" | _ -> assert false
     in
     c1 @ c2 @ [ Printf.sprintf "%s = %s %s %s" t t1 op_str t2 ], t
   | BinOp (op, e1, e2) when List.mem op [ Eq; Neq; Lt; Le; Gt; Ge ] ->
@@ -110,16 +105,10 @@ let rec gen_expr env (e : expr) : string list * string =
     let l_end = fresh_lbl "L_end_" in
     let br =
       match op with
-      | Eq -> "beq"
-      | Neq -> "bne"
-      | Lt -> "blt"
-      | Le -> "ble"
-      | Gt -> "bgt"
-      | Ge -> "bge"
-      | _ -> assert false
+      | Eq  -> "beq" | Neq -> "bne" | Lt  -> "blt"
+      | Le  -> "ble" | Gt  -> "bgt" | Ge  -> "bge" | _ -> assert false
     in
-    ( c1
-      @ c2
+    ( c1 @ c2
       @ [ Printf.sprintf "%s = 0" t
         ; Printf.sprintf "%s %s, %s, %s" br t1 t2 l_true
         ; Printf.sprintf "j %s" l_end
@@ -135,8 +124,7 @@ let rec gen_expr env (e : expr) : string list * string =
     let l_short = fresh_lbl "L_short_" in
     let l_end = fresh_lbl "L_end_" in
     let set_short, set_normal, cond1, cond2 =
-      if op = And
-      then
+      if op = And then
         ( "0"
         , "1"
         , Printf.sprintf "beqz %s, %s" t1 l_short
@@ -186,10 +174,10 @@ let rec gen_expr env (e : expr) : string list * string =
        let t_ret = fresh_tmp () in
        ( List.flatten arg_codes
          @ List.map (fun t -> "param " ^ t) arg_tmps
-         @ [ Printf.sprintf "call %s, %d" fname (List.length arg_tmps)
-           ; Printf.sprintf "%s = retval" t_ret
+         @ [ Printf.sprintf "call %s, %d" fname (List.length arg_tmps);
+            Printf.sprintf "%s = retval" t_ret
            ]
-       , t_ret ))
+       , t_ret))
   | _ -> raise (SemanticError "unsupported expr")
 ;;
 
@@ -203,23 +191,18 @@ let rec gen_stmt env ?break_lbl ?cont_lbl (s : stmt) : string list =
   | VarDecl (id, init_e) ->
     if VarEnv.mem id env.vars then raise (SemanticError ("redefinition of " ^ id));
     let c, t = gen_expr env init_e in
-    (* 生成代码后，不再更新 env，这里仅演示检查。 *)
     c @ [ Printf.sprintf "%s = %s" id t ]
   | Expr e -> fst (gen_expr env e)
   | Return None -> [ "ret 0" ]
   | Return (Some e) ->
     let c, t = gen_expr env e in
-    c @ [ "ret " ^ t ]
+    c @ [ Printf.sprintf "ret %s" t ]
   | If (cond, s_then, s_else_opt) ->
     let c_cond, t_c = gen_expr env cond in
     let l_else = fresh_lbl "L_else_" in
     let l_end = fresh_lbl "L_end_" in
     let then_c = gen_stmt env ?break_lbl ?cont_lbl s_then in
-    let else_c =
-      match s_else_opt with
-      | Some s -> gen_stmt env ?break_lbl ?cont_lbl s
-      | None -> []
-    in
+    let else_c = match s_else_opt with Some s -> gen_stmt env ?break_lbl ?cont_lbl s | None -> [] in
     c_cond
     @ [ Printf.sprintf "beqz %s, %s" t_c l_else ]
     @ then_c
@@ -236,35 +219,115 @@ let rec gen_stmt env ?break_lbl ?cont_lbl (s : stmt) : string list =
     @ [ Printf.sprintf "beqz %s, %s" t_c l_end ]
     @ body_c
     @ [ Printf.sprintf "j %s" l_begin; l_end ^ ":" ]
-  | Break ->
-    (match break_lbl with
-     | Some l -> [ "j " ^ l ]
-     | None -> raise (SemanticError "break not in loop"))
-  | Continue ->
-    (match cont_lbl with
-     | Some l -> [ "j " ^ l ]
-     | None -> raise (SemanticError "continue not in loop"))
+  | Break -> (match break_lbl with Some l -> [ Printf.sprintf "j %s" l ] | None -> raise (SemanticError "break not in loop"))
+  | Continue -> (match cont_lbl with Some l -> [ Printf.sprintf "j %s" l ] | None -> raise (SemanticError "continue not in loop"))
+  | _ -> []
 ;;
-
-(* | _ -> raise (SemanticError "stmt not supported") *)
 
 (* ============================================================= *)
 (*  Function / Program                                            *)
 (* ============================================================= *)
 
-(* 生成单个函数：在调用前把“形参+局部”查出来打成 cg_env *)
-let gen_func (ana : analysis_result) (* ← 新参数，语义分析结果 *) (f : func_def) : string list =
+let gen_func (ana : analysis_result) (f : func_def) : string list =
   let locals =
-    try List.assoc f.fname ana.local_vars with
-    | Not_found -> raise (Failure ("internal: no locals for " ^ f.fname))
+    try List.assoc f.fname ana.local_vars
+    with Not_found -> raise (Failure ("internal: no locals for " ^ f.fname))
   in
   let env = make_env ~globals:ana.global_funcs ~locals in
-  let body_code = List.flatten (List.map (gen_stmt env) f.body) in
-  (f.fname ^ ":") :: body_code
+  (f.fname ^ ":") :: List.flatten (List.map (gen_stmt env) f.body)
 ;;
 
-(* 顶层：先做语义分析，再把结果喂 gen_func *)
 let gen_program (p : program) : string list =
   let ana = Semantic.analyze_program p in
   List.flatten (List.map (gen_func ana) p)
 ;;
+
+(* ------------------------------------------------------------------ *)
+(* Graph Coloring Register Allocation with Spill                    *)
+(* ------------------------------------------------------------------ *)
+module SS = Set.Make(String)
+module SM = Map.Make(String)
+
+let analyze_liveness ir =
+  List.fold_left (fun s instr ->
+    List.fold_left (fun s tok -> if tok <> "=" then SS.add tok s else s) s (String.split_on_char ' ' instr)
+  ) SS.empty ir
+
+let build_interference temps =
+  let g = Hashtbl.create (List.length temps) in
+  List.iter (fun v -> Hashtbl.add g v SS.empty) temps;
+  List.iter (fun v1 ->
+    List.iter (fun v2 -> if v1 <> v2 then
+      let s1 = Hashtbl.find g v1 in Hashtbl.replace g v1 (SS.add v2 s1)
+    ) temps
+  ) temps;
+  g
+
+let simplify g phys stack =
+  let tbl = Hashtbl.copy g in
+  try while Hashtbl.length tbl > 0 do
+    let v = Hashtbl.fold (fun v adj acc -> if SS.cardinal adj < List.length phys then v else acc) tbl "" in
+    Hashtbl.remove tbl v;
+    Stack.push v stack;
+    Hashtbl.iter (fun key adj -> Hashtbl.replace tbl key (SS.remove v adj)) tbl
+  done with _ -> ()
+
+let select stack g phys =
+  let mapping = Hashtbl.create 16 in
+  while not (Stack.is_empty stack) do
+    let v = Stack.pop stack in
+    let adj = Hashtbl.find g v in
+    let used = SS.fold (fun u acc -> match Hashtbl.find_opt mapping u with Some r->r::acc|None->acc) adj [] in
+    match List.find_opt (fun r -> not (List.mem r used)) phys with
+    | Some reg -> Hashtbl.add mapping v reg
+    | None -> failwith ("Spill needed for variable " ^ v)
+  done;
+  mapping
+
+let allocate_registers ir =
+  let phys = ["t0";"t1";"t2";"t3";"t4";"t5"] in
+  let temps = SS.elements (analyze_liveness ir) in
+  let ig = build_interference temps in
+  let stack = Stack.create () in
+  simplify ig phys stack;
+  let mapping = select stack ig phys in
+  List.map (fun instr ->
+    instr
+    |> String.split_on_char ' '
+    |> List.map (fun tok -> try Hashtbl.find mapping tok with Not_found -> tok)
+    |> String.concat " ")
+    ir
+
+(* ------------------------------------------------------------------ *)
+(* Assembly Generation                                                *)
+(* ------------------------------------------------------------------ *)
+let assemble_instr instr =
+  let ws = String.split_on_char ' ' instr in
+  match ws with
+  | [dst;"=";s1;"+";s2] -> Printf.sprintf "  add %s, %s, %s" dst s1 s2
+  | [dst;"=";s1;"-";s2] -> Printf.sprintf "  sub %s, %s, %s" dst s1 s2
+  | [dst;"=";s1;"*";s2] -> Printf.sprintf "  mul %s, %s, %s" dst s1 s2
+  | [dst;"=";s1;"/";s2] -> Printf.sprintf "  div %s, %s, %s" dst s1 s2
+  | ["param";r] -> Printf.sprintf "  mv a0, %s" r
+  | ["call";f;_] -> Printf.sprintf "  call %s" f
+  | ["ret";r] -> Printf.sprintf "  mv a0, %s\n  ret" r
+  | [lbl] when String.get lbl (String.length lbl - 1) = ':' -> lbl
+  | ["j";lbl] -> Printf.sprintf "  j %s" lbl
+  | _ -> failwith ("unhandled: " ^ instr)
+
+let gen_prologue () = [".text"; ".globl main"; "main:"]
+let gen_epilogue () = ["  ret"]
+
+let gen_assembly ir =
+  let colored = allocate_registers ir in
+  gen_prologue () @ List.map assemble_instr colored @ gen_epilogue ()
+
+(* ------------------------------------------------------------------ *)
+(* Public Interface                                                   *)
+(* ------------------------------------------------------------------ *)
+let compile_source src =
+  let lexbuf = Lexing.from_string src in
+  let ast = Parser.program Lexer.token lexbuf in
+  let ir = gen_program ast in
+  gen_assembly ir
+

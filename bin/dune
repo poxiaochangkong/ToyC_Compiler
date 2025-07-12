@@ -1,5 +1,6 @@
 (executable
  (name main)
+ (modules main)
  (public_name toyc_compiler)
  (libraries toyc_compiler_lib)
  (modes byte exe)
