@@ -67,6 +67,7 @@ block:
 /* Stmt -> ... */
 stmt:
   | e=expr SEMICOLON { Expr(e) }
+  | SEMICOLON { Expr(IntLiteral(0)) } (* 添加空语句支持 *)  (*Toyc包含空语句，即一个分号独占一行；*)
   | INT name=ID ASSIGN e=expr SEMICOLON { VarDecl(name, e) }
   | IF LPAREN cond=expr RPAREN then_stmt=stmt { If(cond, then_stmt, None) }
   | IF LPAREN cond=expr RPAREN then_stmt=stmt ELSE else_stmt=stmt { If(cond, then_stmt, Some(else_stmt)) }
@@ -77,7 +78,7 @@ stmt:
   | RETURN SEMICOLON { Return None }
   | RETURN e=expr SEMICOLON { Return (Some (e)) }
   | inner_block=block { Block(inner_block) } /* A block can also be a statement */
-  | error SEMICOLON {Printf.eprintf "Syntax error in statement . Skipping to the next semiclolon. \n"
+  | error SEMICOLON {Printf.eprintf "Syntax error in statement . Skipping to the next semicolon. \n"
                     failwith "Syntax error in statment."}
    /*在解析stmt 语句的是偶出错, 就一直忽略token直到下一个; 到来*/
 
@@ -118,9 +119,9 @@ MulExpr:
   | MulExpr DIVIDE UnaryExpr { BinOp(Div, $1, $3) }
   | MulExpr MOD UnaryExpr    { BinOp(Mod, $1, $3) }
 
-/* UnaryExpr -> PrimaryExpr | ("+" | "-" | "!") UnaryExpr */
+/* UnaryExpr -> PrimaryExpr | ("+" | "-" | "!") UnaryExpr */ 
 UnaryExpr:
-  | PrimaryExpr { $1 }
+  | PrimaryExpr { $1 } 
    | PLUS UnaryExpr  { $2 } /* 正数形式的可以直接优化掉*/
    | MINUS UnaryExpr %prec NEG { UnOp(Neg, $2) } /* Use %prec to give it correct precedence */
    | NOT UnaryExpr   %prec NEG { UnOp(Not, $2) }
@@ -129,6 +130,9 @@ UnaryExpr:
 PrimaryExpr:
   | n=NUMBER { IntLiteral(n) }
   | name=ID { Id(name) }
-  | LPAREN e=expr RPAREN { e }
+  | LPAREN e=expr RPAREN { e }  (*去多余括号*)
   | name=ID LPAREN args=separated_list(COMMA, expr) RPAREN { Call(name, args) }
   | error {failwith "Syntax error in expression."}
+
+  (*eg:  foo(1, x + 2, bar());
+    ast: Call(Id("foo"), [IntLiteral(1); BinOp(Add, Id("x"), IntLiteral(2)); Call(Id("bar"), [])])*)

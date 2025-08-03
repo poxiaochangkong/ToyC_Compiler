@@ -48,15 +48,36 @@ let () =
 open Toyc_compiler_lib
 
 let () =
-  let source_code = "int main() { return 42; }" in
+  let source_code = 
+    "int main() {
+    int x = 5;
+    {
+        int y = 3;
+        x = x + y;
+    }
+    return x;
+}
+" in
   Printf.printf "Attempting to parse:\n---\n%s\n---\n" source_code;
   let lexbuf = Lexing.from_string source_code in
   try
     (* 用带命名空间的模块名 *)
+    (*生成ast*)
     let ast = Parser.program Lexer.token lexbuf in
     print_endline "Success! AST generated:";
     print_endline (Toyc_compiler_lib.Ast.string_of_program ast);
-    ignore(Codegen.gen_program ast)
+    (*ignore(Codegen.gen_program ast)*)
+    (*生成IR*)
+    let ir_code = Codegen.gen_program ast in  
+    print_endline "======================================";  
+    print_endline "Generated IR Code:";  
+    print_endline "--------------------------------------";  
+    List.iter print_endline ir_code;  
+    print_endline "======================================";
+    (* 生成汇编 *)  
+    let assembly = Codegen.gen_assembly ir_code in  
+    print_endline "Generated Assembly:";  
+    List.iter print_endline assembly  
   with
   | Toyc_compiler_lib.Lexer.Error msg -> Printf.eprintf "Lexer Error: %s\n" msg
   | e ->
