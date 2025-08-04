@@ -82,6 +82,9 @@ let make_env ~(globals : func_sig FuncEnv.t) ~(locals : typ VarEnv.t) : cg_env =
 
 (*1.string list:生成的IR指令*)
 (*2.string :表达式结果存储的临时变量 如：返回值：["t0 = 42"], "t0"  *) 
+(*debug:gen_expr函数会为每个变量引用都生成新的临时变量。
+当处理 return x 时，会生成额外的临时变量来存储 x 的值
+debug2:gen_expr导致IR阶段beq t0, t1, L_true_0中间有逗号，转汇编代码时有逗号重复的问题*)
 let rec gen_expr env (e : expr) : string list * string = 
   match e with
   | IntLiteral n ->
@@ -121,7 +124,7 @@ let rec gen_expr env (e : expr) : string list * string =
     in
     ( c1 @ c2
       @ [ Printf.sprintf "%s = 0" t                           (* 初始化结果t2为0 *)
-        ; Printf.sprintf "%s %s, %s, %s" br t1 t2 l_true      (* 如果条件成立，跳转到 l_true *)
+        ; Printf.sprintf "%s %s %s %s" br t1 t2 l_true      (* 如果条件成立，跳转到 l_true *)
         ; Printf.sprintf "j %s" l_end                         (* 否则跳转到 l_end *)
         ; l_true ^ ":"                                        (*输入：x==1*)
         ; Printf.sprintf "%s = 1" t                           (*输出: t0 = x  t1 = 1  t2 = 0*)
@@ -138,13 +141,13 @@ let rec gen_expr env (e : expr) : string list * string =
       if op = And then                         (*实现了对 && 和 ||的短路逻辑优化*)
         ( "0"
         , "1"                                                 
-        , Printf.sprintf "beqz %s, %s" t1 l_short            
-        , Printf.sprintf "beqz %s, %s" t2 l_short )          
+        , Printf.sprintf "beqz %s %s" t1 l_short            
+        , Printf.sprintf "beqz %s %s" t2 l_short )          
       else                                                   
         ( "1"                                                
         , "0"                                                 
-        , Printf.sprintf "bnez %s, %s" t1 l_short            
-        , Printf.sprintf "bnez %s, %s" t2 l_short )          
+        , Printf.sprintf "bnez %s %s" t1 l_short            
+        , Printf.sprintf "bnez %s %s" t2 l_short )          
    in
   ( c1
     @ [ cond1 ]
@@ -164,7 +167,7 @@ let rec gen_expr env (e : expr) : string list * string =
     let l_end = fresh_lbl "L_end_" in
     ( c
       @ [ Printf.sprintf "%s = 0" t
-        ; Printf.sprintf "beqz %s, %s" t1 l_true
+        ; Printf.sprintf "beqz %s %s" t1 l_true
         ; Printf.sprintf "j %s" l_end
         ; l_true ^ ":"
         ; Printf.sprintf "%s = 1" t
@@ -185,7 +188,7 @@ let rec gen_expr env (e : expr) : string list * string =
        let t_ret = fresh_tmp () in
        ( List.flatten arg_codes
          @ List.map (fun t -> "param " ^ t) arg_tmps
-         @ [ Printf.sprintf "call %s, %d" fname (List.length arg_tmps);
+         @ [ Printf.sprintf "call %s %d" fname (List.length arg_tmps);
             Printf.sprintf "%s = retval" t_ret
            ]
        , t_ret))
@@ -219,7 +222,7 @@ let rec gen_stmt env ?break_lbl ?cont_lbl (s : stmt) : string list =
     let then_c = gen_stmt env ?break_lbl ?cont_lbl s_then in
     let else_c = match s_else_opt with Some s -> gen_stmt env ?break_lbl ?cont_lbl s | None -> [] in
     c_cond
-    @ [ Printf.sprintf "beqz %s, %s" t_c l_else ]
+    @ [ Printf.sprintf "beqz %s %s" t_c l_else ]
     @ then_c
     @ [ Printf.sprintf "j %s" l_end; l_else ^ ":" ]
     @ else_c
@@ -231,7 +234,7 @@ let rec gen_stmt env ?break_lbl ?cont_lbl (s : stmt) : string list =
     let body_c = gen_stmt env ~break_lbl:l_end ~cont_lbl:l_begin body in
     [ l_begin ^ ":" ]
     @ c_cond
-    @ [ Printf.sprintf "beqz %s, %s" t_c l_end ]
+    @ [ Printf.sprintf "beqz %s %s" t_c l_end ]
     @ body_c
     @ [ Printf.sprintf "j %s" l_begin; l_end ^ ":" ]
   | Break -> (match break_lbl with Some l -> [ Printf.sprintf "j %s" l ] | None -> raise (SemanticError "break not in loop"))
@@ -317,8 +320,15 @@ let select stack g phys =
   done;
   mapping
 
-
-let allocate_registers ir =
+(* 自定义实现字符串全数字检查 *)
+let is_all_digits s =
+  let rec check i =
+    if i >= String.length s then true
+    else (s.[i] >= '0' && s.[i] <= '9') && check (i + 1)
+  in
+  check 0
+(*已 debug：IR转汇编代码不能return的错误*)
+(*let allocate_registers ir =
   let phys = ["t0";"t1";"t2";"t3";"t4";"t5"] in
   let temps = SS.elements (analyze_liveness ir) in
   let ig = build_interference temps in
@@ -331,7 +341,35 @@ let allocate_registers ir =
     |> List.map (fun tok -> try Hashtbl.find mapping tok with Not_found -> tok)
     |> String.concat " ")
     ir
+*)
 
+(*已 优化debug:当需要分配的临时变量数量超过可用物理寄存器数量时，
+List.nth phys !reg_counter 会抛出 Failure("nth") 异常---
+debug2：在字符串处理时去除逗号*)
+let allocate_registers ir =  
+  let phys = ["t0";"t1";"t2";"t3";"t4";"t5"] in  
+  let mapping = Hashtbl.create 16 in  
+  let reg_counter = ref 0 in  
+    
+  List.map (fun instr ->  
+    let tokens = String.split_on_char ' ' instr in  
+    let replaced_tokens = List.map (fun tok ->  
+      (* 去除逗号后处理 *)  
+      let clean_tok = String.map (function ',' -> ' ' | c -> c) tok |> String.trim in  
+      let suffix = if String.contains tok ',' then "," else "" in  
+      if String.length clean_tok > 0 && clean_tok.[0] = 't' &&   
+         is_all_digits (String.sub clean_tok 1 (String.length clean_tok - 1)) then  
+        try (Hashtbl.find mapping clean_tok) ^ suffix  
+        with Not_found ->  
+          let reg_index = !reg_counter mod (List.length phys) in  
+          let reg = List.nth phys reg_index in  
+          incr reg_counter;  
+          Hashtbl.add mapping clean_tok reg;  
+          reg ^ suffix  
+      else tok  
+    ) tokens in  
+    String.concat " " replaced_tokens  
+  ) ir
 (* ------------------------------------------------------------------ *)
 (* 7.汇编代码生成  Assembly Generation                                 *)
 (* ------------------------------------------------------------------ *)
@@ -341,14 +379,8 @@ let allocate_registers ir =
 2. 生成函数的 prologue（建立栈帧） 和 epilogue(回收栈帧)。
 *)
 
-(* 自定义实现字符串全数字检查 *)
-let is_all_digits s =
-  let rec check i =
-    if i >= String.length s then true
-    else (s.[i] >= '0' && s.[i] <= '9') && check (i + 1)
-  in
-  check 0
 
+(*已 debug:待补充在模式匹配里对条件分支指令的处理*)
 let assemble_instr instr =
   let ws = String.split_on_char ' ' instr in
   match ws with
@@ -367,6 +399,14 @@ let assemble_instr instr =
   | ["ret";r] -> Printf.sprintf "  mv a0, %s\n  ret" r
   | [lbl] when String.get lbl (String.length lbl - 1) = ':' -> lbl
   | ["j";lbl] -> Printf.sprintf "  j %s" lbl
+  | ["blt"; r1; r2; lbl] -> Printf.sprintf "  blt %s, %s, %s" r1 r2 lbl  
+  | ["ble"; r1; r2; lbl] -> Printf.sprintf "  ble %s, %s, %s" r1 r2 lbl  
+  | ["bgt"; r1; r2; lbl] -> Printf.sprintf "  bgt %s, %s, %s" r1 r2 lbl  
+  | ["bge"; r1; r2; lbl] -> Printf.sprintf "  bge %s, %s, %s" r1 r2 lbl  
+  | ["beq"; r1; r2; lbl] -> Printf.sprintf "  beq %s, %s, %s" r1 r2 lbl  
+  | ["bne"; r1; r2; lbl] -> Printf.sprintf "  bne %s, %s, %s" r1 r2 lbl  
+  | ["beqz"; r; lbl] -> Printf.sprintf "  beqz %s, %s" r lbl  
+  | ["bnez"; r; lbl] -> Printf.sprintf "  bnez %s, %s" r lbl  
   (*| _ -> failwith ("unhandled: " ^ instr)*)
   | _ ->
       Printf.eprintf "Unhandled instruction: %s\n" instr;
@@ -375,9 +415,17 @@ let assemble_instr instr =
 let gen_prologue () = [".text"; ".globl main"; "main:"]
 let gen_epilogue () = ["  ret"]
 
-let gen_assembly ir =
+(*let gen_assembly ir =
   let colored = allocate_registers ir in
   gen_prologue () @ List.map assemble_instr colored @ gen_epilogue ()
+*)
+(*已 debug:IR转汇编代码出现指令重复，修改算法：*)
+let gen_assembly ir =  
+  let colored = allocate_registers ir in  
+  let filtered_ir = List.filter (fun instr ->   
+    not (String.contains instr ':' && String.get instr (String.length instr - 1) = ':')  
+  ) colored in  
+  gen_prologue () @ List.map assemble_instr filtered_ir
 
 (* ------------------------------------------------------------------ *)
 (* 8.公共接口 Public Interface                                         *)
@@ -392,4 +440,3 @@ let compile_source src =
   let ast = Parser.program Lexer.token lexbuf in
   let ir = gen_program ast in
   gen_assembly ir
-

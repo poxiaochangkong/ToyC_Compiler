@@ -50,13 +50,15 @@ open Toyc_compiler_lib
 let () =
   let source_code = 
     "int main() {
-    int x = 5;
-    {
-        int y = 3;
-        x = x + y;
+    int x = 3;
+    if (x > 2) {
+        x = x + 1;
+    } else {
+        x = x - 1;
     }
     return x;
 }
+
 " in
   Printf.printf "Attempting to parse:\n---\n%s\n---\n" source_code;
   let lexbuf = Lexing.from_string source_code in
@@ -85,3 +87,13 @@ let () =
     Printexc.print_backtrace stderr;
     exit 1
 ;;
+
+
+
+
+
+
+
+
+
+
