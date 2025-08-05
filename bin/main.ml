@@ -49,14 +49,16 @@ open Toyc_compiler_lib
 
 let () =
   let source_code = 
-    "int main() {
-    int x = 3;
-    if (x > 2) {
-        x = x + 1;
+    "int fact(int n) {
+    if (n <= 1) {
+        return 1;
     } else {
-        x = x - 1;
+        return n * fact(n - 1);
     }
-    return x;
+}
+
+int main() {
+    return fact(5);
 }
 
 " in
