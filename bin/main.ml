@@ -49,17 +49,15 @@ open Toyc_compiler_lib
 
 let () =
   let source_code = 
-    "int fact(int n) {
-    if (n <= 1) {
-        return 1;
-    } else {
-        return n * fact(n - 1);
-    }
+    "int add(int a, int b) {
+    return a + b;
 }
 
 int main() {
-    return fact(5);
+    int x = add(3, 4);
+    return x;
 }
+
 
 " in
   Printf.printf "Attempting to parse:\n---\n%s\n---\n" source_code;
