@@ -1,442 +1,336 @@
-(* (* lib/codegen.ml *)
-open Ast
-
-let generate_code (prog : program) : string =
-  let buffer = Buffer.create 1024 in
-  (* 目前我们只处理程序中的第一个函数 *)
-  let main_func = List.hd prog in
-  (* 生成汇编代码头部 *)
-  Buffer.add_string buffer ".globl main\n";
-  Buffer.add_string buffer "main:\n";
-  (* 函数序言 (Function Prologue) *)
-  Buffer.add_string buffer "  push %rbp\n";
-  Buffer.add_string buffer "  mov %rsp, %rbp\n";
-  (* 遍历函数体内的语句 *)
-  List.iter
-    (fun statement ->
-       match statement with
-       | Return expr ->
-         (match expr with
-          | IntLiteral n ->
-            (* 将返回值放入 %eax 寄存器 *)
-            Buffer.add_string buffer (Printf.sprintf "  mov $%d, %%eax\n" n)
-          | _ -> failwith "Code generation for this expression is not implemented yet")
-       | _ -> failwith "Code generation for this statement is not implemented yet")
-    main_func.body;
-  (* 函数尾声 (Function Epilogue) *)
-  Buffer.add_string buffer "  pop %rbp\n";
-  Buffer.add_string buffer "  ret\n";
-  Buffer.contents buffer
-;;
-*)
-(* codegen.ml *)
-(* • 分离临时与标签计数器
-    • 布尔、比较、短路逻辑归一化为 0/1
-    • 调用序列 param / call / retval
-    假设物理寄存器6个
---------------------------------------------------------------*)
-
+(* lib/codegen.ml *)
 open Ast
 open Semantic
 
-(* ---------- 1. 计数器 ---------- *)
-(*用于生成临时变量和标签
-1.临时变量用于存储中间计算结果。
-2.标签用于控制流（如条件跳转、循环）*)
-let temp_counter = ref 0
-let label_counter = ref 0
+(*******************************************************************
+ * 1. 中间表示 (Intermediate Representation) 和环境定义
+ *******************************************************************)
 
-let fresh_tmp () =  (*生成唯一的临时变量（如 t0, t1）*)
-  let t = "t" ^ string_of_int !temp_counter in
-  incr temp_counter;
-  t
-;;
+(**
+ * 操作数类型。
+ * 这是 codegen.mli 中 `type operand` 的具体实现。
+ *)
+type operand =
+  | Imm of int          (* 立即数, e.g., 5 *)
+  | Reg of string       (* 物理或虚拟寄存器, e.g., "t0", "a0" *)
+  | Stack of int        (* 栈上位置 (相对于fp的偏移量), e.g., -4, -8 *)
 
-let fresh_lbl pfx = (*生成唯一的标签（如 L0, L1）*)
-  let l = pfx ^ string_of_int !label_counter in
-  incr label_counter;
-  l
-;;
+(* * 为了在没有 .mli 文件的情况下打破模块间的类型依赖，
+ * 我们在内部复制一份操作符的定义。
+ *)
+type ir_binop = | IR_Add | IR_Sub | IR_Mul | IR_Div | IR_Mod
+                | IR_Eq | IR_Neq | IR_Lt | IR_Le | IR_Gt | IR_Ge
+                | IR_And | IR_Or
+type ir_unop = IR_Neg | IR_Not
 
-exception SemanticError of string (* 查符号失败时抛出 *)
+(**
+ * 中间表示 (IR) 类型。
+ * 这是 codegen.mli 中 `type ir` 的具体实现。
+ *)
+type ir =
+  | Label of string
+  | Li of operand * int
+  | Move of operand * operand
+  | BinOp of ir_binop * operand * operand * operand
+  | UnOp of ir_unop * operand * operand
+  | Load of operand * operand
+  | Store of operand * operand
+  | Branch of ir_binop * operand * operand * string
+  | BranchZ of operand * string
+  | BranchNZ of operand * string
+  | Jump of string
+  | Call of string * int
+  | Ret
+  | Prologue of string * int
+  | Epilogue of string * int
 
-(* ---------- 2. 符号表环境 ---------- *)
-(* 把语义阶段的符号信息打包成 codegen 用的 env *)
-(*make_env 函数将符号表转换为代码生成环境（cg_env）
-1.vars：存储局部变量的类型信息。
-2.funcs：存储全局函数的签名信息。
-*)
-type cg_env =
-  { vars : typ Semantic.VarEnv.t
-  ; funcs : func_sig Semantic.FuncEnv.t 
-  }
+(* 代码生成环境 (内部使用) *)
+type cg_env = {
+  funcs: func_sig FuncEnv.t;
+  vars: int VarEnv.t;
+  mutable stack_top: int;
+  mutable temp_counter: int;
+  mutable label_counter: int;
+}
 
-let make_env ~(globals : func_sig FuncEnv.t) ~(locals : typ VarEnv.t) : cg_env =
-  { vars = locals; funcs = globals }
-;;
+(* 创建一个新的临时寄存器名 (t0-t5) *)
+let fresh_temp_reg env =
+  if env.temp_counter >= 6 then failwith "Expression too complex, ran out of temporary registers";
+  let reg_name = "t" ^ string_of_int env.temp_counter in
+  env.temp_counter <- env.temp_counter + 1;
+  Reg reg_name
 
-(* ============================================================= *)
-(*  3.表达式生成    Expr → code * result tmp                      *)
-(* ============================================================= *)
-(*将expr转换成中间表示IR*)
+(* 创建一个新的标签 *)
+let fresh_label env pfx =
+  let label_name = pfx ^ string_of_int env.label_counter in
+  env.label_counter <- env.label_counter + 1;
+  label_name
 
-(*1.string list:生成的IR指令*)
-(*2.string :表达式结果存储的临时变量 如：返回值：["t0 = 42"], "t0"  *) 
-(*debug:gen_expr函数会为每个变量引用都生成新的临时变量。
-当处理 return x 时，会生成额外的临时变量来存储 x 的值
-debug2:gen_expr导致IR阶段beq t0, t1, L_true_0中间有逗号，转汇编代码时有逗号重复的问题*)
-let rec gen_expr env (e : expr) : string list * string = 
+(* 将 Ast 操作符转换为内部 IR 操作符的辅助函数 *)
+let binop_from_ast_op op =
+  match op with
+  | Add -> IR_Add | Sub -> IR_Sub | Mul -> IR_Mul | Div -> IR_Div | Mod -> IR_Mod
+  | Eq -> IR_Eq | Neq -> IR_Neq | Lt -> IR_Lt | Le -> IR_Le | Gt -> IR_Gt | Ge -> IR_Ge
+  | And -> IR_And | Or -> IR_Or
+
+let unop_from_ast_op op =
+  match op with
+  | Neg -> IR_Neg | Not -> IR_Not
+
+(*******************************************************************
+ * 2. 从 AST 到 IR 的转换 (内部函数)
+ *******************************************************************)
+
+let rec gen_expr_ir_internal env (e: expr) : ir list * operand =
   match e with
   | IntLiteral n ->
-    let t = fresh_tmp () in                   (* 输入：42*)
-    [ Printf.sprintf "%s = %d" t n ], t       (* 输出：t0=42 *)
-  | Id x ->                                     
-    (match VarEnv.find_opt x env.vars with
-     | None -> raise (SemanticError ("unbound variable " ^ x))
-     | Some _ ->
-       let t = fresh_tmp () in                        (* 输入：x*)
-       [ Printf.sprintf "%s = %s" t x ], t)           (* 输出：t1=x*)
-  | Assign (x, rhs) ->
-    if VarEnv.find_opt x env.vars = None
-    then raise (SemanticError ("assignment to undeclared " ^ x));
-    let c_rhs, t_rhs = gen_expr env rhs in
-    let t_ret = fresh_tmp () in                                                           (* 输入：x = 42 *)
-    c_rhs @ [ Printf.sprintf "%s = %s" x t_rhs; Printf.sprintf "%s = %s" t_ret x ], t_ret (* 输出：t2 = x, t2 = 42 *)
-  | BinOp (op, e1, e2) when List.mem op [ Add; Sub; Mul; Div; Mod ] ->
-    let c1, t1 = gen_expr env e1 in
-    let c2, t2 = gen_expr env e2 in
-    let t = fresh_tmp () in
-    let op_str =
-      match op with
-      | Add -> "+" | Sub -> "-" | Mul -> "*" | Div -> "/" | Mod -> "%" | _ -> assert false
-    in                                                                       (* 输入：e1 + e2 *)                    
-    c1 @ c2 @ [ Printf.sprintf "%s = %s %s %s" t t1 op_str t2 ], t           (* 输出：t2 = t0 + t1 *)
-  | BinOp (op, e1, e2) when List.mem op [ Eq; Neq; Lt; Le; Gt; Ge ] ->
-    let c1, t1 = gen_expr env e1 in
-    let c2, t2 = gen_expr env e2 in
-    let t = fresh_tmp () in
-    let l_true = fresh_lbl "L_true_" in                 (*eg:L_true_0*)
-    let l_end = fresh_lbl "L_end_" in                   (*eg:L_end_0*)
-    let br =
-      match op with
-      | Eq  -> "beq" | Neq -> "bne" | Lt  -> "blt"
-      | Le  -> "ble" | Gt  -> "bgt" | Ge  -> "bge" | _ -> assert false
-    in
-    ( c1 @ c2
-      @ [ Printf.sprintf "%s = 0" t                           (* 初始化结果t2为0 *)
-        ; Printf.sprintf "%s %s %s %s" br t1 t2 l_true      (* 如果条件成立，跳转到 l_true *)
-        ; Printf.sprintf "j %s" l_end                         (* 否则跳转到 l_end *)
-        ; l_true ^ ":"                                        (*输入：x==1*)
-        ; Printf.sprintf "%s = 1" t                           (*输出: t0 = x  t1 = 1  t2 = 0*)
-        ; l_end ^ ":"                                         (*beq t0, t1, L_true_0  j L_end_0  *)
-        ]                                                     (*L_true_0:t2 = 1       L_end_0:*)
-    , t )
-  | BinOp (op, e1, e2) when op = And || op = Or ->
-    let c1, t1 = gen_expr env e1 in
-    let c2, t2 = gen_expr env e2 in
-    let t_res = fresh_tmp () in
-    let l_short = fresh_lbl "L_short_" in
-    let l_end = fresh_lbl "L_end_" in
-    let set_short, set_normal, cond1, cond2 =  (*布尔逻辑归一化,简化布尔逻辑的处理*)
-      if op = And then                         (*实现了对 && 和 ||的短路逻辑优化*)
-        ( "0"
-        , "1"                                                 
-        , Printf.sprintf "beqz %s %s" t1 l_short            
-        , Printf.sprintf "beqz %s %s" t2 l_short )          
-      else                                                   
-        ( "1"                                                
-        , "0"                                                 
-        , Printf.sprintf "bnez %s %s" t1 l_short            
-        , Printf.sprintf "bnez %s %s" t2 l_short )          
-   in
-  ( c1
-    @ [ cond1 ]
-    @ c2
-    @ [ cond2
-      ; Printf.sprintf "%s = %s" t_res set_normal
-      ; Printf.sprintf "j %s" l_end
-      ; l_short ^ ":"
-      ; Printf.sprintf "%s = %s" t_res set_short
-      ; l_end ^ ":"
-      ]
-  , t_res )
-  | UnOp (Not, e1) -> 
-    let c, t1 = gen_expr env e1 in                
-    let t = fresh_tmp () in
-    let l_true = fresh_lbl "L_true_" in    
-    let l_end = fresh_lbl "L_end_" in
-    ( c
-      @ [ Printf.sprintf "%s = 0" t
-        ; Printf.sprintf "beqz %s %s" t1 l_true
-        ; Printf.sprintf "j %s" l_end
-        ; l_true ^ ":"
-        ; Printf.sprintf "%s = 1" t
-        ; l_end ^ ":"
-        ]
-    , t )
-  | UnOp (Neg, e1) ->
-    let c, t1 = gen_expr env e1 in
-    let t = fresh_tmp () in                           (*输入：-x*)
-    c @ [ Printf.sprintf "%s = - %s" t t1 ], t        (*输出：t0 = - x*)
+      let temp_reg = fresh_temp_reg env in
+      [Li (temp_reg, n)], temp_reg
+  | Id x ->
+      let var_loc = VarEnv.find x env.vars in
+      let temp_reg = fresh_temp_reg env in
+      [Load (temp_reg, Stack var_loc)], temp_reg
+  | Assign (x, rhs_expr) ->
+      let rhs_ir, rhs_op = gen_expr_ir_internal env rhs_expr in
+      let var_loc = VarEnv.find x env.vars in
+      rhs_ir @ [Store (rhs_op, Stack var_loc)], rhs_op
+  | UnOp (op, expr) ->
+      let expr_ir, expr_op = gen_expr_ir_internal env expr in
+      let dest_reg = fresh_temp_reg env in
+      expr_ir @ [UnOp (unop_from_ast_op op, dest_reg, expr_op)], dest_reg
+  | BinOp (op, e1, e2) when List.mem op [Add; Sub; Mul; Div; Mod] ->
+      let ir1, op1 = gen_expr_ir_internal env e1 in
+      let ir2, op2 = gen_expr_ir_internal env e2 in
+      let dest_reg = fresh_temp_reg env in
+      ir1 @ ir2 @ [BinOp (binop_from_ast_op op, dest_reg, op1, op2)], dest_reg
+  | BinOp (op, e1, e2) when List.mem op [Eq; Neq; Lt; Le; Gt; Ge] ->
+      let ir1, op1 = gen_expr_ir_internal env e1 in
+      let ir2, op2 = gen_expr_ir_internal env e2 in
+      let dest_reg = fresh_temp_reg env in
+      let true_label = fresh_label env "L_true_" in
+      let end_label = fresh_label env "L_end_" in
+      ir1 @ ir2 @ [
+        Li (dest_reg, 0);
+        Branch (binop_from_ast_op op, op1, op2, true_label);
+        Jump end_label;
+        Label true_label;
+        Li (dest_reg, 1);
+        Label end_label;
+      ], dest_reg
+  | BinOp (And, e1, e2) ->
+      let dest_reg = fresh_temp_reg env in
+      let false_label = fresh_label env "L_false_" in
+      let end_label = fresh_label env "L_end_" in
+      let ir1, op1 = gen_expr_ir_internal env e1 in
+      let ir2, op2 = gen_expr_ir_internal env e2 in
+      ir1 @
+      [BranchZ (op1, false_label)] @
+      ir2 @
+      [BranchZ (op2, false_label)] @
+      [Li (dest_reg, 1); Jump end_label;] @
+      [Label false_label; Li (dest_reg, 0);] @
+      [Label end_label], dest_reg
+  | BinOp (Or, e1, e2) ->
+      let dest_reg = fresh_temp_reg env in
+      let true_label = fresh_label env "L_true_" in
+      let end_label = fresh_label env "L_end_" in
+      let ir1, op1 = gen_expr_ir_internal env e1 in
+      let ir2, op2 = gen_expr_ir_internal env e2 in
+      ir1 @
+      [BranchNZ (op1, true_label)] @
+      ir2 @
+      [BranchNZ (op2, true_label)] @
+      [Li (dest_reg, 0); Jump end_label;] @
+      [Label true_label; Li (dest_reg, 1);] @
+      [Label end_label], dest_reg
   | Call (fname, args) ->
-    (match FuncEnv.find_opt fname env.funcs with
-     | None -> raise (SemanticError ("unknown function " ^ fname))
-     | Some sig_ ->
-       if List.length args <> List.length sig_.params
-       then raise (SemanticError ("arity mismatch in call " ^ fname));
-       let arg_codes, arg_tmps = List.split (List.map (gen_expr env) args) in
-       let t_ret = fresh_tmp () in
-       ( List.flatten arg_codes
-         @ List.map (fun t -> "param " ^ t) arg_tmps
-         @ [ Printf.sprintf "call %s %d" fname (List.length arg_tmps);
-            Printf.sprintf "%s = retval" t_ret
-           ]
-       , t_ret))
-  | _ -> raise (SemanticError "unsupported expr")
-;;
+      let args_code_and_ops = List.map (gen_expr_ir_internal env) args in
+      let args_code = List.concat_map fst args_code_and_ops in
+      let arg_ops = List.map snd args_code_and_ops in
+      let reg_args, stack_args =
+        let rec split n lst = if n <= 0 then ([], lst) else match lst with | [] -> ([], []) | h :: t -> let (taken, rest) = split (n - 1) t in (h :: taken, rest)
+        in split 8 arg_ops
+      in
+      let reg_passing_ir = List.mapi (fun i op -> Move (Reg ("a" ^ string_of_int i), op)) reg_args in
+      let stack_passing_ir = List.mapi (fun i op -> Store (op, Stack (i * -4))) (List.rev stack_args) in
+      let num_stack_args = List.length stack_args in
+      let ret_reg = Reg "a0" in
+      let temp_ret_reg = fresh_temp_reg env in
+      let call_ir = [Call (fname, num_stack_args); Move (temp_ret_reg, ret_reg)] in
+      args_code @ stack_passing_ir @ reg_passing_ir @ call_ir, temp_ret_reg
+  | _ -> failwith "Unsupported expression type in codegen"
 
-(* ============================================================= *)
-(*  4.语句生成 Stmt → code list                                   *)
-(* ============================================================= *)
-(*将stmt转化为中间表示IR*)
-
-let rec gen_stmt env ?break_lbl ?cont_lbl (s : stmt) : string list =
+and gen_stmt_ir_internal env ?break_lbl ?cont_lbl (s: stmt) : ir list =
+  (* **FIX**: Reset temporary register counter for each new statement *)
+  env.temp_counter <- 0;
   match s with
-  | Block lst -> List.flatten (List.map (gen_stmt env ?break_lbl ?cont_lbl) lst)
-  (*| VarDecl (id, init_e) ->
-    if VarEnv.mem id env.vars then raise (SemanticError ("redefinition of " ^ id));
-    let c, t = gen_expr env init_e in
-    c @ [ Printf.sprintf "%s = %s" id t ]*)  (*sementic.ml里已经检查过了*)
-  | VarDecl (id, init_e) ->
-    let c, t = gen_expr env init_e in
-    c @ [ Printf.sprintf "%s = %s" id t ]  
-  | Expr e -> fst (gen_expr env e)
-  | Return None -> [ "ret 0" ]
+  | Expr e -> fst (gen_expr_ir_internal env e)
+  | Return None -> [Ret]
   | Return (Some e) ->
-    let c, t = gen_expr env e in
-    c @ [ Printf.sprintf "ret %s" t ]
-  | If (cond, s_then, s_else_opt) ->
-    let c_cond, t_c = gen_expr env cond in
-    let l_else = fresh_lbl "L_else_" in
-    let l_end = fresh_lbl "L_end_" in
-    let then_c = gen_stmt env ?break_lbl ?cont_lbl s_then in
-    let else_c = match s_else_opt with Some s -> gen_stmt env ?break_lbl ?cont_lbl s | None -> [] in
-    c_cond
-    @ [ Printf.sprintf "beqz %s %s" t_c l_else ]
-    @ then_c
-    @ [ Printf.sprintf "j %s" l_end; l_else ^ ":" ]
-    @ else_c
-    @ [ l_end ^ ":" ]
+      let ir, op = gen_expr_ir_internal env e in
+      ir @ [Move (Reg "a0", op); Ret]
+  | VarDecl (id, init_e) ->
+      let ir, op = gen_expr_ir_internal env init_e in
+      let var_loc = VarEnv.find id env.vars in
+      ir @ [Store (op, Stack var_loc)]
+  | Block stmts -> List.concat_map (gen_stmt_ir_internal env ?break_lbl ?cont_lbl) stmts
+  | If (cond, then_s, else_s_opt) ->
+      let cond_ir, cond_op = gen_expr_ir_internal env cond in
+      let else_label = fresh_label env "L_else_" in
+      let end_label = fresh_label env "L_end_" in
+      let then_ir = gen_stmt_ir_internal env ?break_lbl ?cont_lbl then_s in
+      (match else_s_opt with
+      | None ->
+          cond_ir @ [BranchZ (cond_op, end_label)] @ then_ir @ [Label end_label]
+      | Some else_s ->
+          let else_ir = gen_stmt_ir_internal env ?break_lbl ?cont_lbl else_s in
+          cond_ir @ [BranchZ (cond_op, else_label)] @ then_ir @ [Jump end_label; Label else_label] @ else_ir @ [Label end_label]
+      )
   | While (cond, body) ->
-    let l_begin = fresh_lbl "L_begin_" in
-    let l_end = fresh_lbl "L_end_" in
-    let c_cond, t_c = gen_expr env cond in
-    let body_c = gen_stmt env ~break_lbl:l_end ~cont_lbl:l_begin body in
-    [ l_begin ^ ":" ]
-    @ c_cond
-    @ [ Printf.sprintf "beqz %s %s" t_c l_end ]
-    @ body_c
-    @ [ Printf.sprintf "j %s" l_begin; l_end ^ ":" ]
-  | Break -> (match break_lbl with Some l -> [ Printf.sprintf "j %s" l ] | None -> raise (SemanticError "break not in loop"))
-  | Continue -> (match cont_lbl with Some l -> [ Printf.sprintf "j %s" l ] | None -> raise (SemanticError "continue not in loop"))
-  (*| _ -> []*)
-;;
+      let start_label = fresh_label env "L_while_start_" in
+      let end_label = fresh_label env "L_while_end_" in
+      let cond_ir, cond_op = gen_expr_ir_internal env cond in
+      let body_ir = gen_stmt_ir_internal env ~break_lbl:end_label ~cont_lbl:start_label body in
+      [Label start_label] @ cond_ir @ [BranchZ (cond_op, end_label)] @ body_ir @ [Jump start_label; Label end_label]
+  | Break -> (match break_lbl with Some lbl -> [Jump lbl] | None -> failwith "break statement not within a loop")
+  | Continue -> (match cont_lbl with Some lbl -> [Jump lbl] | None -> failwith "continue statement not within a loop")
 
-(* ============================================================= *)
-(* 5.函数和程序生成  Function / Program                           *)
-(* ============================================================= *)
-(*将函数和整个程序转换为中间表示IR*)
-
-(*
-1.获取函数的局部变量环境。
-2.构建代码生成环境。
-3.遍历函数体中的每个语句，生成对应的 IR。*)
-let gen_func (ana : analysis_result) (f : func_def) : string list =
-  let locals =
-    try List.assoc f.fname ana.local_vars
-    with Not_found -> raise (Failure ("internal: no locals for " ^ f.fname))
+let gen_func_ir_internal (ana: analysis_result) (f: func_def) : ir list =
+  let locals_map = List.assoc f.fname ana.local_vars in
+  let stack_offset = ref 0 in
+  let assign_offset () = stack_offset := !stack_offset - 4; !stack_offset in
+  let params_with_offsets =
+    List.mapi (fun i name ->
+      if i < 8 then (name, assign_offset (), Some (Reg ("a" ^ string_of_int i)))
+      else (name, 8 + (i - 8) * 4, None)
+    ) f.params
   in
-  let env = make_env ~globals:ana.global_funcs ~locals in
-  (f.fname ^ ":") :: List.flatten (List.map (gen_stmt env) f.body)
-;;
+  let locals_with_offsets = VarEnv.fold (fun name _ acc -> (name, assign_offset (), None) :: acc) locals_map [] in
+  let var_map = List.fold_left (fun acc (name, offset, _) -> VarEnv.add name offset acc) VarEnv.empty (params_with_offsets @ locals_with_offsets) in
+  let env = {
+    funcs = ana.global_funcs; vars = var_map; stack_top = !stack_offset;
+    temp_counter = 0; label_counter = 0;
+  } in
+  let body_ir = List.concat_map (gen_stmt_ir_internal env) f.body in
+  let params_save_ir =
+    List.filter_map (function (_, offset, Some reg) -> Some (Store (reg, Stack offset)) | _ -> None) params_with_offsets
+  in
+  let required_stack = abs env.stack_top + 8 in
+  let stack_size = if required_stack mod 16 == 0 then required_stack else required_stack + (16 - required_stack mod 16) in
+  [Prologue (f.fname, stack_size)] @ params_save_ir @ body_ir @ [Epilogue (f.fname, stack_size)]
 
-(*
-1.调用语义分析模块生成符号表。
-2.遍历每个函数，调用 gen_func 生成 IR。*)
-let gen_program (p : program) : string list =
+(*******************************************************************
+ * 3. 从 IR 到 RISC-V 汇编的转换 (内部函数)
+ *******************************************************************)
+
+let ir_to_asm_list_internal (ir_instr: ir) : string list =
+  let op_to_str op = match op with
+    | Imm i -> string_of_int i
+    | Reg s -> s
+    | Stack i -> Printf.sprintf "%d(fp)" i
+  in
+  match ir_instr with
+  | Label s -> [s ^ ":"]
+  | Li (dest, imm) -> [Printf.sprintf "  li %s, %d" (op_to_str dest) imm]
+  | Move (dest, src) -> [Printf.sprintf "  mv %s, %s" (op_to_str dest) (op_to_str src)]
+  | Load (dest, src) -> [Printf.sprintf "  lw %s, %s" (op_to_str dest) (op_to_str src)]
+  | Store (src, Stack i) -> [Printf.sprintf "  sw %s, %d(sp)" (op_to_str src) i]
+  | Store (src, dest) -> [Printf.sprintf "  sw %s, %s" (op_to_str src) (op_to_str dest)]
+  | Jump s -> [Printf.sprintf "  j %s" s]
+  | Ret -> failwith "Ret should not be directly converted, it's handled by Epilogue"
+  | Call (s, num_stack_args) ->
+      let stack_space = num_stack_args * 4 in
+      if stack_space > 0 then
+        [Printf.sprintf "  addi sp, sp, -%d" stack_space;
+         Printf.sprintf "  call %s" s;
+         Printf.sprintf "  addi sp, sp, %d" stack_space]
+      else [Printf.sprintf "  call %s" s]
+  | UnOp (op, dest, src) ->
+      let op_str = match op with IR_Neg -> "neg" | IR_Not -> "seqz" in
+      [Printf.sprintf "  %s %s, %s" op_str (op_to_str dest) (op_to_str src)]
+  | BinOp (op, dest, src1, src2) ->
+      let op_str = match op with | IR_Add -> "add" | IR_Sub -> "sub" | IR_Mul -> "mul" | IR_Div -> "div" | IR_Mod -> "rem" | _ -> failwith "Invalid op" in
+      [Printf.sprintf "  %s %s, %s, %s" op_str (op_to_str dest) (op_to_str src1) (op_to_str src2)]
+  | BranchZ (src, label) -> [Printf.sprintf "  beqz %s, %s" (op_to_str src) label]
+  | BranchNZ (src, label) -> [Printf.sprintf "  bnez %s, %s" (op_to_str src) label]
+  | Branch (op, src1, src2, label) ->
+      let branch_op_str = match op with | IR_Eq -> "beq" | IR_Neq -> "bne" | IR_Lt -> "blt" | IR_Le -> "ble" | IR_Gt -> "bgt" | IR_Ge -> "bge" | _ -> failwith "Invalid op" in
+      (match src1, src2 with
+       | Reg _, Reg _ -> [Printf.sprintf "  %s %s, %s, %s" branch_op_str (op_to_str src1) (op_to_str src2) label]
+       | Reg r, Imm i -> [Printf.sprintf "  li t6, %d" i; Printf.sprintf "  %s %s, t6, %s" branch_op_str r label]
+       | Imm i, Reg r -> [Printf.sprintf "  li t6, %d" i; Printf.sprintf "  %s t6, %s, %s" branch_op_str r label]
+       | _ -> failwith "Invalid operands for branch")
+  | Prologue (fname, stack_size) ->
+      [ "  .text"; "  .globl " ^ fname; fname ^ ":";
+        Printf.sprintf "  addi sp, sp, -%d" stack_size;
+        Printf.sprintf "  sw ra, %d(sp)" (stack_size - 4);
+        Printf.sprintf "  sw fp, %d(sp)" (stack_size - 8);
+        Printf.sprintf "  addi fp, sp, %d" stack_size; ]
+  | Epilogue (fname, stack_size) ->
+      [ ".L_ret_" ^ fname ^ ":";
+        Printf.sprintf "  lw fp, %d(sp)" (stack_size - 8);
+        Printf.sprintf "  lw ra, %d(sp)" (stack_size - 4);
+        Printf.sprintf "  addi sp, sp, %d" stack_size;
+        "  ret"; ]
+
+(*******************************************************************
+ * 4. 公共接口 (Public Interface)
+ *******************************************************************)
+
+let string_of_ir (ir_instr: ir) : string =
+  let op_to_str op = match op with
+    | Imm i -> string_of_int i
+    | Reg s -> s
+    | Stack i -> Printf.sprintf "stack[%d]" i
+  in
+  let binop_to_str op = match op with
+    | IR_Add -> "+" | IR_Sub -> "-" | IR_Mul -> "*" | IR_Div -> "/" | IR_Mod -> "%"
+    | IR_Eq -> "==" | IR_Neq -> "!=" | IR_Lt -> "<" | IR_Le -> "<=" | IR_Gt -> ">" | IR_Ge -> ">="
+    | IR_And -> "&&" | IR_Or -> "||"
+  in
+  match ir_instr with
+  | Label s -> s ^ ":"
+  | Li (dest, imm) -> Printf.sprintf "  %s = %d" (op_to_str dest) imm
+  | Move (dest, src) -> Printf.sprintf "  %s = %s" (op_to_str dest) (op_to_str src)
+  | Load (dest, src) -> Printf.sprintf "  %s = *%s" (op_to_str dest) (op_to_str src)
+  | Store (src, dest) -> Printf.sprintf "  *%s = %s" (op_to_str dest) (op_to_str src)
+  | Jump s -> Printf.sprintf "  j %s" s
+  | Ret -> "  ret"
+  | Call (s, n) -> Printf.sprintf "  call %s, %d" s n
+  | UnOp (op, dest, src) ->
+      let op_str = match op with IR_Neg -> "-" | IR_Not -> "!" in
+      Printf.sprintf "  %s = %s%s" (op_to_str dest) op_str (op_to_str src)
+  | BinOp (op, dest, src1, src2) ->
+      Printf.sprintf "  %s = %s %s %s" (op_to_str dest) (op_to_str src1) (binop_to_str op) (op_to_str src2)
+  | BranchZ (src, label) -> Printf.sprintf "  ifz %s j %s" (op_to_str src) label
+  | BranchNZ (src, label) -> Printf.sprintf "  ifnz %s j %s" (op_to_str src) label
+  | Branch (op, src1, src2, label) ->
+      Printf.sprintf "  if %s %s %s j %s" (op_to_str src1) (binop_to_str op) (op_to_str src2) label
+  | Prologue (fname, size) -> Printf.sprintf "prologue %s, %d" fname size
+  | Epilogue (fname, size) -> Printf.sprintf "epilogue %s, %d" fname size
+
+let gen_program (p: program) : ir list =
   let ana = Semantic.analyze_program p in
-  List.flatten (List.map (gen_func ana) p)
-;;
+  List.concat_map (gen_func_ir_internal ana) p
 
-(* ------------------------------------------------------------------ *)
-(* 6.寄存器分配  Graph Coloring Register Allocation with Spill         *)
-(* ------------------------------------------------------------------ *)
-(*使用图着色算法分配寄存器*)
-(* 1.分析每条指令的活跃变量
-   2.构建干扰图
-   3.简化干扰图
-   4.分配寄存器
-*)
-module SS = Set.Make(String)
-module SM = Map.Make(String)
-
-(*分析活跃变量*)
-let analyze_liveness ir =
-  List.fold_left (fun s instr ->
-    List.fold_left (fun s tok -> if tok <> "=" then SS.add tok s else s) s (String.split_on_char ' ' instr)
-  ) SS.empty ir
-
-(*构建干扰图*)
-let build_interference temps =  
-  let g = Hashtbl.create (List.length temps) in
-  List.iter (fun v -> Hashtbl.add g v SS.empty) temps;
-  List.iter (fun v1 ->
-    List.iter (fun v2 -> if v1 <> v2 then
-      let s1 = Hashtbl.find g v1 in Hashtbl.replace g v1 (SS.add v2 s1)
-    ) temps
-  ) temps;
-  g
-
-(*简化干扰图*)
-let simplify g phys stack =
-  let tbl = Hashtbl.copy g in
-  try while Hashtbl.length tbl > 0 do
-    let v = Hashtbl.fold (fun v adj acc -> if SS.cardinal adj < List.length phys then v else acc) tbl "" in
-    Hashtbl.remove tbl v;
-    Stack.push v stack;
-    Hashtbl.iter (fun key adj -> Hashtbl.replace tbl key (SS.remove v adj)) tbl
-  done with _ -> ()
-
-(*分配寄存器*)
-let select stack g phys =
-  let mapping = Hashtbl.create 16 in
-  while not (Stack.is_empty stack) do
-    let v = Stack.pop stack in
-    let adj = Hashtbl.find g v in
-    let used = SS.fold (fun u acc -> match Hashtbl.find_opt mapping u with Some r->r::acc|None->acc) adj [] in
-    match List.find_opt (fun r -> not (List.mem r used)) phys with
-    | Some reg -> Hashtbl.add mapping v reg
-    | None -> failwith ("Spill needed for variable " ^ v)
-  done;
-  mapping
-
-(* 自定义实现字符串全数字检查 *)
-let is_all_digits s =
-  let rec check i =
-    if i >= String.length s then true
-    else (s.[i] >= '0' && s.[i] <= '9') && check (i + 1)
+let gen_assembly (ir_code: ir list) : string list =
+  let current_fname = ref "" in
+  let convert_ir_to_asm ir =
+    (match ir with
+    | Prologue (fname, _) -> current_fname := fname
+    | Epilogue (fname, _) -> current_fname := fname
+    | _ -> ());
+    if ir = Ret then [Printf.sprintf "  j .L_ret_%s" !current_fname]
+    else ir_to_asm_list_internal ir
   in
-  check 0
-(*已 debug：IR转汇编代码不能return的错误*)
-(*let allocate_registers ir =
-  let phys = ["t0";"t1";"t2";"t3";"t4";"t5"] in
-  let temps = SS.elements (analyze_liveness ir) in
-  let ig = build_interference temps in
-  let stack = Stack.create () in
-  simplify ig phys stack;
-  let mapping = select stack ig phys in
-  List.map (fun instr ->
-    instr
-    |> String.split_on_char ' '
-    |> List.map (fun tok -> try Hashtbl.find mapping tok with Not_found -> tok)
-    |> String.concat " ")
-    ir
-*)
+  List.concat_map convert_ir_to_asm ir_code
 
-(*已 优化debug:当需要分配的临时变量数量超过可用物理寄存器数量时，
-List.nth phys !reg_counter 会抛出 Failure("nth") 异常---
-debug2：在字符串处理时去除逗号*)
-let allocate_registers ir =  
-  let phys = ["t0";"t1";"t2";"t3";"t4";"t5"] in  
-  let mapping = Hashtbl.create 16 in  
-  let reg_counter = ref 0 in  
-    
-  List.map (fun instr ->  
-    let tokens = String.split_on_char ' ' instr in  
-    let replaced_tokens = List.map (fun tok ->  
-      (* 去除逗号后处理 *)  
-      let clean_tok = String.map (function ',' -> ' ' | c -> c) tok |> String.trim in  
-      let suffix = if String.contains tok ',' then "," else "" in  
-      if String.length clean_tok > 0 && clean_tok.[0] = 't' &&   
-         is_all_digits (String.sub clean_tok 1 (String.length clean_tok - 1)) then  
-        try (Hashtbl.find mapping clean_tok) ^ suffix  
-        with Not_found ->  
-          let reg_index = !reg_counter mod (List.length phys) in  
-          let reg = List.nth phys reg_index in  
-          incr reg_counter;  
-          Hashtbl.add mapping clean_tok reg;  
-          reg ^ suffix  
-      else tok  
-    ) tokens in  
-    String.concat " " replaced_tokens  
-  ) ir
-(* ------------------------------------------------------------------ *)
-(* 7.汇编代码生成  Assembly Generation                                 *)
-(* ------------------------------------------------------------------ *)
-(*将中间表示（IR）转换为 RISC-V32 汇编代码*)
-(*步骤：
-1. 将 IR 指令转换为汇编指令。
-2. 生成函数的 prologue（建立栈帧） 和 epilogue(回收栈帧)。
-*)
+let generate_code (p: program) : string =
+  let ir = gen_program p in
+  let asm_lines = gen_assembly ir in
+  String.concat "\n" asm_lines
 
-
-(*已 debug:待补充在模式匹配里对条件分支指令的处理*)
-let assemble_instr instr =
-  let ws = String.split_on_char ' ' instr in
-  match ws with
-  | [dst;"=";src] when is_all_digits src ->  (* 替换String.for_all *)
-      (* 常量赋值，例如 t0 = 1 *)
-      Printf.sprintf "  li %s, %s" dst src
-  | [dst;"=";src] ->
-      (* 简单赋值，例如 t1 = t0 *)
-      Printf.sprintf "  mv %s, %s" dst src
-  | [dst;"=";s1;"+";s2] -> Printf.sprintf "  add %s, %s, %s" dst s1 s2
-  | [dst;"=";s1;"-";s2] -> Printf.sprintf "  sub %s, %s, %s" dst s1 s2
-  | [dst;"=";s1;"*";s2] -> Printf.sprintf "  mul %s, %s, %s" dst s1 s2
-  | [dst;"=";s1;"/";s2] -> Printf.sprintf "  div %s, %s, %s" dst s1 s2
-  | ["param";r] -> Printf.sprintf "  mv a0, %s" r
-  | ["call";f;_] -> Printf.sprintf "  call %s" f
-  | ["ret";r] -> Printf.sprintf "  mv a0, %s\n  ret" r
-  | [lbl] when String.get lbl (String.length lbl - 1) = ':' -> lbl
-  | ["j";lbl] -> Printf.sprintf "  j %s" lbl
-  | ["blt"; r1; r2; lbl] -> Printf.sprintf "  blt %s, %s, %s" r1 r2 lbl  
-  | ["ble"; r1; r2; lbl] -> Printf.sprintf "  ble %s, %s, %s" r1 r2 lbl  
-  | ["bgt"; r1; r2; lbl] -> Printf.sprintf "  bgt %s, %s, %s" r1 r2 lbl  
-  | ["bge"; r1; r2; lbl] -> Printf.sprintf "  bge %s, %s, %s" r1 r2 lbl  
-  | ["beq"; r1; r2; lbl] -> Printf.sprintf "  beq %s, %s, %s" r1 r2 lbl  
-  | ["bne"; r1; r2; lbl] -> Printf.sprintf "  bne %s, %s, %s" r1 r2 lbl  
-  | ["beqz"; r; lbl] -> Printf.sprintf "  beqz %s, %s" r lbl  
-  | ["bnez"; r; lbl] -> Printf.sprintf "  bnez %s, %s" r lbl  
-  (*| _ -> failwith ("unhandled: " ^ instr)*)
-  | _ ->
-      Printf.eprintf "Unhandled instruction: %s\n" instr;
-      failwith ("unhandled: " ^ instr)
-
-let gen_prologue () = [".text"; ".globl main"; "main:"]
-let gen_epilogue () = ["  ret"]
-
-(*let gen_assembly ir =
-  let colored = allocate_registers ir in
-  gen_prologue () @ List.map assemble_instr colored @ gen_epilogue ()
-*)
-(*已 debug:IR转汇编代码出现指令重复，修改算法：*)
-let gen_assembly ir =  
-  let colored = allocate_registers ir in  
-  let filtered_ir = List.filter (fun instr ->   
-    not (String.contains instr ':' && String.get instr (String.length instr - 1) = ':')  
-  ) colored in  
-  gen_prologue () @ List.map assemble_instr filtered_ir
-
-(* ------------------------------------------------------------------ *)
-(* 8.公共接口 Public Interface                                         *)
-(* ------------------------------------------------------------------ *)
-(*从源代码生成汇编代码*)
-(*
-1.调用词法分析器和语法分析器生成 AST。
-2.调用代码生成模块生成 IR 和汇编代码。
-*)
-let compile_source src =
+let compile_source (src: string) : string =
   let lexbuf = Lexing.from_string src in
   let ast = Parser.program Lexer.token lexbuf in
-  let ir = gen_program ast in
-  gen_assembly ir
+  generate_code ast
