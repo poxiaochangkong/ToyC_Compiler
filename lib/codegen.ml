@@ -99,6 +99,8 @@ let unop_from_ast_op op =
  * 2. 从 AST 到 IR 的转换 (内部函数)
  *******************************************************************)
 
+(* 在 lib/codegen.ml 中，替换掉整个这个函数 *)
+
 let rec gen_expr_ir_internal env (e: expr) : ir list * operand =
   match e with
   | IntLiteral n ->
@@ -117,63 +119,146 @@ let rec gen_expr_ir_internal env (e: expr) : ir list * operand =
       let dest_reg = fresh_temp_reg env in
       expr_ir @ [UnOp (unop_from_ast_op op, dest_reg, expr_op)], dest_reg
   | BinOp (op, e1, e2) ->
-      (match op with
-      | And ->
-          let dest_reg = fresh_temp_reg env in
-          let false_label = fresh_label env "L_false_" in
-          let end_label = fresh_label env "L_end_" in
-          let ir1, op1 = gen_expr_ir_internal env e1 in
-          env.temp_counter <- 0; (* Reset for e2 *)
-          let ir2, op2 = gen_expr_ir_internal env e2 in
-          ir1 @ [BranchZ(op1, false_label)] @ ir2 @ [BranchZ(op2, false_label)] @
-          [Li(dest_reg, 1); Jump(end_label); Label(false_label); Li(dest_reg, 0); Label(end_label)], dest_reg
-      | Or ->
-          let dest_reg = fresh_temp_reg env in
-          let true_label = fresh_label env "L_true_" in     
-          let end_label = fresh_label env "L_end_" in
-          let ir1, op1 = gen_expr_ir_internal env e1 in
-          env.temp_counter <- 0; (* Reset for e2 *)
-          let ir2, op2 = gen_expr_ir_internal env e2 in
-          ir1 @ [BranchNZ(op1, true_label)] @ ir2 @ [BranchNZ(op2, true_label)] @
-          [Li(dest_reg, 0); Jump(end_label); Label(true_label); Li(dest_reg, 1); Label(end_label)], dest_reg
-      | _ ->
-          (* Robust strategy: evaluate right, spill, evaluate left, load, compute *)
-          let ir2, op2 = gen_expr_ir_internal env e2 in
-          let temp_slot = alloc_temp_stack_slot env in
-          let save_ir = [Store(op2, temp_slot)] in
+    (match op with
+    (* 短路求值逻辑保持不变 *)
+    | And ->
+        let dest_reg = fresh_temp_reg env in
+        let false_label = fresh_label env "L_false_" in
+        let end_label = fresh_label env "L_end_" in
+        let ir1, op1 = gen_expr_ir_internal env e1 in
+        env.temp_counter <- 0;
+        let ir2, op2 = gen_expr_ir_internal env e2 in
+        ir1 @ [BranchZ(op1, false_label)] @ ir2 @ [BranchZ(op2, false_label)] @
+        [Li(dest_reg, 1); Jump(end_label); Label(false_label); Li(dest_reg, 0); Label(end_label)], dest_reg
+    | Or ->
+        let dest_reg = fresh_temp_reg env in
+        let true_label = fresh_label env "L_true_" in
+        let end_label = fresh_label env "L_end_" in
+        let ir1, op1 = gen_expr_ir_internal env e1 in
+        env.temp_counter <- 0;
+        let ir2, op2 = gen_expr_ir_internal env e2 in
+        ir1 @ [BranchNZ(op1, true_label)] @ ir2 @ [BranchNZ(op2, true_label)] @
+        [Li(dest_reg, 0); Jump(end_label); Label(true_label); Li(dest_reg, 1); Label(end_label)], dest_reg
+
+    (* 【最终修复】针对算术和比较运算的稳健、高效逻辑 *)
+    | _ ->
+        (* 1. 首先计算左操作数 e1 *)
+        let ir1, op1 = gen_expr_ir_internal env e1 in
+
+        (* 2. 将其结果保存到栈上的一个临时槽位 *)
+        let temp_slot_e1 = alloc_temp_stack_slot env in
+        let save_ir1 = [Store(op1, temp_slot_e1)] in
+
+        (* 3. 重置寄存器计数器，然后计算右操作数 e2 *)
+        env.temp_counter <- 0;
+        let ir2, op2 = gen_expr_ir_internal env e2 in
+
+        (* 4. 从栈中加载 e1 的结果到一个新的临时寄存器 *)
+        let loaded_op1 = fresh_temp_reg env in
+        let load_ir1 = [Load(loaded_op1, temp_slot_e1)] in
+        
+        (* 5. e2 的结果 (op2) 将被用作目标寄存器 *)
+        let dest_op = op2 in
+        
+        (* 6. 根据操作符生成最终指令 *)
+        let final_op = binop_from_ast_op op in
+        (match final_op with
+        | IR_Eq | IR_Neq | IR_Lt | IR_Le | IR_Gt | IR_Ge ->
+            let true_label = fresh_label env "L_true_" in
+            let end_label = fresh_label env "L_end_" in
+            (* 指令组合: 计算e1 -> 保存e1 -> 计算e2 -> 加载e1 -> 比较与跳转 *)
+            ir1 @ save_ir1 @ ir2 @ load_ir1 @
+            [
+              Li(dest_op, 0); 
+              Branch(final_op, loaded_op1, dest_op, true_label); 
+              Jump(end_label);
+              Label(true_label); 
+              Li(dest_op, 1); 
+              Label(end_label)
+            ], dest_op
+        | _ ->
+            (* 算术运算: 计算e1 -> 保存e1 -> 计算e2 -> 加载e1 -> 执行运算 *)
+            ir1 @ save_ir1 @ ir2 @ load_ir1 @
+            [BinOp(final_op, dest_op, loaded_op1, dest_op)], dest_op
+        )
+    )
+   | Call (fname, args) ->
+    (* 1. 像之前一样，计算所有参数的值，并存入临时的栈槽(-fp)中 *)
+    let (eval_args_ir, temp_arg_slots_rev) =
+      List.fold_left
+        (fun (acc_ir, acc_slots) arg_expr ->
           env.temp_counter <- 0;
-          let ir1, op1 = gen_expr_ir_internal env e1 in
-          let loaded_op2 = fresh_temp_reg env in
-          let load_ir = [Load(loaded_op2, temp_slot)] in
-          let dest_reg = fresh_temp_reg env in
-          let final_op = binop_from_ast_op op in
-          (match final_op with
-          | IR_Eq | IR_Neq | IR_Lt | IR_Le | IR_Gt |  IR_Ge ->
-              let true_label = fresh_label env "L_true_" in
-              let end_label = fresh_label env "L_end_" in
-              ir2 @ save_ir @ ir1 @ load_ir @
-              [Li(dest_reg, 0); Branch(final_op, op1, loaded_op2, true_label); Jump(end_label);
-               Label(true_label); Li(dest_reg, 1); Label(end_label)], dest_reg
-          | _ ->
-              ir2 @ save_ir @ ir1 @ load_ir @ [BinOp(final_op, dest_reg, op1, loaded_op2)], dest_reg
-          )
-      )
-  | Call (fname, args) ->
-      let args_code_and_ops = List.map (gen_expr_ir_internal env) args in
-      let args_code = List.concat_map fst args_code_and_ops in
-      let arg_ops = List.map snd args_code_and_ops in
-      let reg_args, stack_args =
-        let rec split n lst = if n <= 0 then ([], lst) else match lst with | [] -> ([], []) | h :: t -> let (taken, rest) = split (n - 1) t in (h :: taken, rest)
-        in split 8 arg_ops
-      in
-      let reg_passing_ir = List.mapi (fun i op -> Move (Reg ("a" ^ string_of_int i), op)) reg_args in
-      let stack_passing_ir = List.mapi (fun i op -> Store (op, Stack (i * -4))) (List.rev stack_args) in
-      let num_stack_args = List.length stack_args in      
-      let ret_reg = Reg "a0" in
-      let temp_ret_reg = fresh_temp_reg env in
-      let call_ir = [Call (fname, num_stack_args);
-Move (temp_ret_reg, ret_reg)] in
-      args_code @ stack_passing_ir @ reg_passing_ir @ call_ir, temp_ret_reg
+          let (arg_ir, arg_op) = gen_expr_ir_internal env arg_expr in
+          let temp_slot = alloc_temp_stack_slot env in
+          let store_ir = [Store (arg_op, temp_slot)] in
+          (acc_ir @ arg_ir @ store_ir, temp_slot :: acc_slots)
+        )
+        ([], [])
+        args
+    in
+    let temp_arg_slots = List.rev temp_arg_slots_rev in
+    env.temp_counter <- 0;
+
+    (* 2. 分离寄存器参数和栈参数 *)
+    let reg_arg_slots, stack_arg_slots =
+      let rec split n lst = if n <= 0 then ([], lst) else match lst with | [] -> ([], []) | h :: t -> let (taken, rest) = split (n - 1) t in (h :: taken, rest)
+      in split 8 temp_arg_slots
+    in
+    let num_stack_args = List.length stack_arg_slots in
+    let stack_space_for_args = num_stack_args * 4 in
+
+    (* 3. 【新】为栈参数预分配空间 (生成 addi sp, sp, -N) *)
+    let ir_alloc_stack =
+      if stack_space_for_args > 0 then
+        [BinOp(IR_Sub, Reg "sp", Reg "sp", Imm stack_space_for_args)]
+      else
+        []
+    in
+
+    (* 4. 加载寄存器参数 *)
+    let ir_pass_reg_args =
+      List.mapi (fun i temp_slot ->
+        let reg = Reg ("a" ^ string_of_int i) in
+        [Load(reg, temp_slot)]
+      ) reg_arg_slots |> List.concat
+    in
+
+    (* 5. 【修正】加载并存储栈参数到【正确】的位置 (0(sp), 4(sp)...) *)
+    let ir_pass_stack_args =
+      List.mapi (fun i temp_slot ->
+        env.temp_counter <- 0;
+        let temp_reg = fresh_temp_reg env in
+        (* 偏移量现在从0开始，相对于新的sp *)
+        [Load(temp_reg, temp_slot); Store(temp_reg, Stack (i * 4))]
+      ) stack_arg_slots |> List.concat
+    in
+    
+    (* 6. 执行函数调用 (不再需要调整sp) *)
+    let ir_call = [Call (fname, 0)] in (* 第二个参数设为0 *)
+
+    (* 7. 【新】释放为栈参数分配的空间 (生成 addi sp, sp, N) *)
+    let ir_dealloc_stack =
+      if stack_space_for_args > 0 then
+        [BinOp(IR_Add, Reg "sp", Reg "sp", Imm stack_space_for_args)]
+      else
+        []
+    in
+
+    (* 8. 处理返回值 *)
+    env.temp_counter <- 0;
+    let temp_ret_reg = fresh_temp_reg env in
+    let ir_move_ret = [Move (temp_ret_reg, Reg "a0")] in
+
+    (* 9. 【关键】按正确顺序组合所有IR *)
+    ( eval_args_ir @         (* a. 计算所有参数值 *)
+      ir_pass_reg_args @     (* b. 准备寄存器参数 *)
+      ir_alloc_stack @       (* c. 【先】分配栈空间 *)
+      ir_pass_stack_args @   (* d. 【后】将参数存入新空间 *)
+      ir_call @              (* e. 调用函数 *)
+      ir_dealloc_stack @     (* f. 释放栈空间 *)
+      ir_move_ret,           (* g. 保存返回值 *)
+      temp_ret_reg
+    )
 (* _ -> failwith "Unsupported expression type in codegen" *)
 
 
@@ -251,79 +336,124 @@ and gen_stmts_ir_internal (env: cg_env) ?break_lbl ?cont_lbl (stmts: stmt list) 
     stmts
 
 (* MODIFIED: This function now correctly calculates stack size after generating the body IR. *)
+(* 在 lib/codegen.ml 中，完全替换掉这个函数 *)
+
+(**************************** 替换为以下代码 ****************************)
 let gen_func_ir_internal (ana: analysis_result) (f: func_def) : ir list =
-  (* 1. Setup initial environment for parameters *)
-  let param_offset = ref (-8) in
-  let params_with_offsets =
-    List.mapi (fun i name ->
+  (* 1. 为所有参数在本地栈帧中分配“家” (local storage) *)
+  let param_offset = ref (-8) in (* fp-4是ra, fp-8是旧fp *)
+  let params_with_local_offsets =
+    List.map (fun name ->
       param_offset := !param_offset - 4;
-      let offset = if i < 8 then !param_offset else 8 + (i - 8) * 4 in
-      let reg_opt = if i < 8 then Some (Reg ("a" ^ string_of_int i)) else None in
-      (name, offset, reg_opt)
+      (name, !param_offset)
     ) f.params
   in
-  let initial_var_map = List.fold_left (fun acc (name, offset, _) -> VarEnv.add name offset acc) VarEnv.empty params_with_offsets in
+  (* 【修复一】: 使用 List.fold_left 替代 VarEnv.of_list *)
+  let initial_var_map =
+    List.fold_left
+      (fun acc (name, offset) -> VarEnv.add name offset acc)
+      VarEnv.empty
+      params_with_local_offsets
+  in
 
-  (* 2. Create the initial generation environment *)
+  (* 2. 生成将传入参数值复制到这些“新家”的IR指令 *)
+  let copy_params_ir =
+    (* 【修复二】: 将未使用的 'name' 变量改为 '_name' *)
+    List.mapi (fun i (_name, local_offset) ->
+      if i < 8 then
+        (* a. 对于寄存器参数 (a0-a7): 直接存入新家 *)
+        let reg_name = "a" ^ string_of_int i in
+        [Store (Reg reg_name, Stack local_offset)]
+      else
+        (* b. 对于栈参数: 先从调用者栈帧加载，再存入新家 *)
+        let source_offset_from_fp = 4 + (i - 8) * 4 in
+        let temp_reg = Reg "t0" in (* 使用一个固定的临时寄存器 *)
+        [
+          Load (temp_reg, Stack source_offset_from_fp);
+          Store (temp_reg, Stack local_offset)
+        ]
+    ) params_with_local_offsets |> List.concat
+  in
+
+  (* 3. 创建初始代码生成环境 *)
   let env = {
-  funcs = ana.global_funcs;
-    vars = [initial_var_map]; (* Start with one scope for parameters *)
+    funcs = ana.global_funcs;
+    vars = [initial_var_map];
     stack_top = ref !param_offset;
     temp_counter = 0;
     label_counter = 0;
-    current_function_name = f.fname; (* INITIALIZE HERE *)
-} in
+    current_function_name = f.fname;
+  } in
 
-  (* 3. Generate the IR for the function body using the new helper. *)
+  (* 4. 生成函数体的IR *)
   let (body_ir, final_env) = gen_stmts_ir_internal env f.body in
 
-  (* 4. Save parameters from registers to stack *)
-  let params_save_ir =
-    List.filter_map (function (_, offset, Some reg) -> Some (Store (reg, Stack offset)) | _ -> None) params_with_offsets
-  in
-
-  (* 5. Calculate final stack size using the final environment's stack_top. *)
+  (* 5. 计算最终需要的总栈大小，并确保16字节对齐 *)
   let required_stack = abs !(final_env.stack_top) + 8 in
   let stack_size = if required_stack mod 16 == 0 then required_stack else required_stack + (16 - required_stack mod 16) in
 
-  (* 6. Assemble the full function IR *)
-  [Prologue (f.fname, stack_size)] @ params_save_ir @ body_ir @ [Epilogue (f.fname, stack_size)]
-
-
+  (* 6. 组合最终的函数IR *)
+  [Prologue (f.fname, stack_size)] @
+  copy_params_ir @
+  body_ir @
+  [Epilogue (f.fname, stack_size)]
+(**************************** 替换结束 ****************************)
 (*******************************************************************
  * 3. 从 IR 到 RISC-V 汇编的转换 (内部函数)
  *******************************************************************)
 (* This section remains unchanged *)
 let ir_to_asm_list_internal (ir_instr: ir) : string list =
-  let op_to_str op = 
-match op with
+  let op_to_str op =
+    match op with
     | Imm i -> string_of_int i
     | Reg s -> s
-    | Stack i -> Printf.sprintf "%d(fp)" i
+    | Stack i -> Printf.sprintf "%d(fp)" i (* 栈操作数总是相对于fp *)
   in
   match ir_instr with
   | Label s -> [s ^ ":"]
   | Li (dest, imm) -> [Printf.sprintf "  li %s, %d" (op_to_str dest) imm]
   | Move (dest, src) -> [Printf.sprintf "  mv %s, %s" (op_to_str dest) (op_to_str src)]
   | Load (dest, src) -> [Printf.sprintf "  lw %s, %s" (op_to_str dest) (op_to_str src)]
-  | Store (src, Stack i) when i < 0 -> [Printf.sprintf "  sw %s, %d(fp)" (op_to_str src) i]
-  | Store (src, Stack i) -> [Printf.sprintf "  sw %s, %d(sp)" (op_to_str src) i]
-  | Store (src, dest) -> [Printf.sprintf "  sw %s, %s" (op_to_str src) (op_to_str dest)]
+  | Store (src, Stack i) when i < 0 ->
+      (* 存储到fp负偏移量的本地变量/临时槽位 *)
+      [Printf.sprintf "  sw %s, %d(fp)" (op_to_str src) i]
+  | Store (src, Stack i) ->
+      (* 存储到sp正偏移量的参数槽位 *)
+      [Printf.sprintf "  sw %s, %d(sp)" (op_to_str src) i]
+  | Store (src, dest) ->
+      (* 这是一个备用情况，理论上不应发生 *)
+      [Printf.sprintf "  sw %s, %s" (op_to_str src) (op_to_str dest)]
   | Jump s -> [Printf.sprintf "  j %s" s]
   | Ret -> failwith "Ret should not be directly converted, it's handled by Epilogue"
-  | Call (s, num_stack_args) ->
-      let stack_space = num_stack_args * 4 in
-      if stack_space > 0 then
-        [Printf.sprintf "  addi sp, sp, -%d" stack_space;
-         Printf.sprintf "  call %s" s;
-         Printf.sprintf "  addi sp, sp, %d" stack_space]
-      else [Printf.sprintf "  call %s" s]
+  
+  (*** 这是本次的核心 ***)
+  | Call (s, stack_arg_space) ->
+      if stack_arg_space > 0 then
+        (* 如果有栈参数，正确地调整sp来分配和释放空间 *)
+        [ Printf.sprintf "  addi sp, sp, -%d" stack_arg_space;
+          Printf.sprintf "  call %s" s;
+          Printf.sprintf "  addi sp, sp, %d" stack_arg_space; ]
+      else
+        (* 如果没有栈参数，直接调用即可 *)
+        [Printf.sprintf "  call %s" s]
+  (*************************)
+        
   | UnOp (op, dest, src) ->
       let op_str = match op with IR_Neg -> "neg" | IR_Not -> "seqz" in
       [Printf.sprintf "  %s %s, %s" op_str (op_to_str dest) (op_to_str src)]
+  | BinOp (op, dest, src1, Imm imm) ->
+      let op_str = match op with
+        | IR_Add -> "addi" | IR_Sub -> "addi"
+        | _ -> failwith "Unsupported immediate operation for this BinOp"
+      in
+      let immediate = if op = IR_Sub then -imm else imm in
+      [Printf.sprintf "  %s %s, %s, %d" op_str (op_to_str dest) (op_to_str src1) immediate]
   | BinOp (op, dest, src1, src2) ->
-      let op_str = match op with | IR_Add -> "add" | IR_Sub -> "sub" | IR_Mul -> "mul" | IR_Div -> "div" | IR_Mod -> "rem" |
-_ -> failwith "Invalid op" in
+      let op_str = match op with
+        | IR_Add -> "add" | IR_Sub -> "sub" | IR_Mul -> "mul"
+        | IR_Div -> "div" | IR_Mod -> "rem"
+        | _ -> failwith "Unsupported register-register operation for this BinOp"
+      in
       [Printf.sprintf "  %s %s, %s, %s" op_str (op_to_str dest) (op_to_str src1) (op_to_str src2)]
   | BranchZ (src, label) -> [Printf.sprintf "  beqz %s, %s" (op_to_str src) label]
   | BranchNZ (src, label) -> [Printf.sprintf "  bnez %s, %s" (op_to_str src) label]
