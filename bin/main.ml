@@ -48,39 +48,30 @@ let () =
 open Toyc_compiler_lib
 
 let () =
-  let source_code = 
-    "int add(int a, int b) {
-    return a + b;
-}
-
-int main() {
-    int x = add(3, 4);
-    return x;
-}
-
-
-" in
-  Printf.printf "Attempting to parse:\n---\n%s\n---\n" source_code;
-  let lexbuf = Lexing.from_string source_code in
+  
+  let lexbuf = Lexing.from_channel stdin in
   try
     (* 用带命名空间的模块名 *)
     (*生成ast*)
     let ast = Parser.program Lexer.token lexbuf in
-    print_endline "Success! AST generated:";
-    print_endline (Toyc_compiler_lib.Ast.string_of_program ast);
+    (* print_endline "Success! AST generated:"; *)
+    (* print_endline (Toyc_compiler_lib.Ast.string_of_program ast); *)
     (*ignore(Codegen.gen_program ast)*)
     (*生成IR*)
      let ir_code = Codegen.gen_program ast in
-    print_endline "======================================";
+    (* print_endline "======================================";
     print_endline "Generated IR Code:";
-    print_endline "--------------------------------------";
+    print_endline "--------------------------------------"; *)
     (* 使用 Codegen.string_of_ir 将每条 IR 指令转换为字符串后再打印 *)
-    List.iter (fun instr -> print_endline (Codegen.string_of_ir instr)) ir_code;
-    print_endline "======================================";
+    (* List.iter (fun instr -> print_endline (Codegen.string_of_ir instr)) ir_code;
+    print_endline "======================================"; *)
     (* 生成汇编 *)  
     let assembly = Codegen.gen_assembly ir_code in  
-    print_endline "Generated Assembly:" ;
-    List.iter print_endline assembly  
+    (* print_endline "Generated Assembly:" ; *)
+    List.iter print_endline assembly 
+    (* let oc = open_out "output.s" in
+    List.iter (fun line -> Printf.fprintf oc "%s\n" line) assembly; *)
+    (* close_out oc;  *)
   with
   | Toyc_compiler_lib.Lexer.Error msg -> Printf.eprintf "Lexer Error: %s\n" msg
   | e ->
