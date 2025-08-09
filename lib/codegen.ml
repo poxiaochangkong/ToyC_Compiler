@@ -366,7 +366,7 @@ let gen_func_ir_internal (ana: analysis_result) (f: func_def) : ir list =
         [Store (Reg reg_name, Stack local_offset)]
       else
         (* b. 对于栈参数: 先从调用者栈帧加载，再存入新家 *)
-        let source_offset_from_fp = 4 + (i - 8) * 4 in
+        let source_offset_from_fp = 0 + (i - 8) * 4 in
         let temp_reg = Reg "t0" in (* 使用一个固定的临时寄存器 *)
         [
           Load (temp_reg, Stack source_offset_from_fp);
