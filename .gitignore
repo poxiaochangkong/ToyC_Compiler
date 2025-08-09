@@ -21,3 +21,6 @@ lexer.ml
 *.swp
 *~
 .vscode/
+
+/test/
+/tests/
